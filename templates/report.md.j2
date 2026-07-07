@@ -1,0 +1,95 @@
+{#-
+  Daily Briefing Report Template
+  
+  Variables:
+    date_str: "2026-05-22"
+    tldr: 콜아웃 박스용 핵심 문단
+    mega_trend: {summary, key_threads[]}
+    categories: [{name, emoji, has_sufficient_data, limitation_note,
+                  key_flows[], deep_issues[], minor_issues[], insight}]
+      각 deep_issue: {title, context, implication, watch_points, sources[]}
+      각 minor_issue: {title, summary, implication, sources[]}
+      sources[]: [{name, title, url}]  (renderer가 id_to_article에서 미리 매핑)
+    source_list_str: "전자신문 · 블로터 · ..."
+  
+  Notion 변환 마커:
+    "▶ ### 제목"  → toggle heading_3
+    "> 💡 **헤더**\n> 내용"  → callout
+-#}
+# 📰 {{ date_str }} 데일리 브리핑
+
+{%- if tldr %}
+
+> 💡 **오늘의 핵심**
+{%- for line in tldr.strip().split('\n') %}
+> {{ line }}
+{%- endfor %}
+{%- endif %}
+
+---
+
+## 🌐 오늘의 메가 트렌드
+
+{{ mega_trend.summary.strip() }}
+
+{%- if mega_trend.key_threads %}
+
+**분야 횡단 흐름**
+{%- for thread in mega_trend.key_threads %}
+- {{ thread }}
+{%- endfor %}
+{%- endif %}
+
+{%- for cat in categories %}
+
+---
+
+## {{ cat.emoji }} {{ cat.name }}
+
+{%- if not cat.has_sufficient_data and cat.limitation_note %}
+
+*⚠️ {{ cat.limitation_note }}*
+{%- endif %}
+
+{%- if cat.key_flows %}
+
+### 🎯 핵심 흐름
+{%- for flow in cat.key_flows %}
+- {{ flow }}
+{%- endfor %}
+{%- endif %}
+
+{%- for issue in cat.deep_issues %}
+
+▶ ### 📊 {{ issue.title }}
+   - **맥락**: {{ issue.context }}
+   - **함의**: {{ issue.implication }}
+   - **관전 포인트**: {{ issue.watch_points }}
+   {%- if issue.sources %}
+
+   📰 관련 기사
+   {%- for src in issue.sources %}
+   - [{{ src.name }}] [{{ src.title }}]({{ src.url }})
+   {%- endfor %}
+   {%- endif %}
+{%- endfor %}
+
+{%- if cat.minor_issues %}
+
+▶ ### 📌 그 외 이슈 ({{ cat.minor_issues|length }}건)
+{%- for m in cat.minor_issues %}
+   - **{{ m.title }}**{% if m.sources %} ({% for src in m.sources %}[{{ src.name }}]({{ src.url }}){% if not loop.last %} · {% endif %}{% endfor %}){% endif %}
+     {{ m.summary }} {{ m.implication }}
+{%- endfor %}
+{%- endif %}
+
+{%- if cat.insight %}
+
+### 💡 전문가 인사이트
+{{ cat.insight.strip() }}
+{%- endif %}
+{%- endfor %}
+
+---
+
+_수집 매체: {{ source_list_str }}_

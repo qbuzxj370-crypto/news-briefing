@@ -1,0 +1,75 @@
+name: Daily News Briefing
+
+on:
+  schedule:
+    # KST 07:00 = UTC 22:00 (전날)
+    - cron: '0 22 * * *'
+  workflow_dispatch:  # 수동 실행도 허용
+
+jobs:
+  briefing:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # 재실행 대비: 같은 날 앞선 실행의 수집·분류 스냅샷(*_snapshot.json)을
+      # 백업 아티팩트에서 복원. 늦은 재실행은 RSS 피드 top-N이 갱신되어
+      # 1차 표본을 잃으므로(2026-06-11 관찰), 스냅샷이 있으면 main.py가
+      # 수집·분류를 건너뛰고 동일 표본으로 분석부터 재개한다.
+      # 다른 날짜의 스냅샷은 main.py가 무시하므로 최근 실행 것을 받아도 무해.
+      - name: Restore snapshot from previous run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p backups
+          for id in $(gh run list --workflow daily.yml --limit 5 --json databaseId --jq '.[].databaseId'); do
+            [ "$id" = "${{ github.run_id }}" ] && continue
+            if timeout 30 gh run download "$id" --name "backups-$id" --dir /tmp/prev_backup 2>/dev/null; then
+              cp /tmp/prev_backup/*_snapshot.json backups/ 2>/dev/null \
+                && echo "스냅샷 복원: run $id" \
+                || echo "run $id 아티팩트에 스냅샷 없음"
+              rm -rf /tmp/prev_backup
+              break
+            fi
+          done
+          ls backups/ 2>/dev/null || true
+
+      - name: Run daily briefing
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+          NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        # 종료코드 분기: 1(수집 0건)은 준일상 실패라 green 유지,
+        # 2(분석 실패)·3(업로드 실패)은 red로 표시해 실패를 알림.
+        # 백업 업로드는 다음 스텝의 if: always()가 보장하므로
+        # continue-on-error는 쓰지 않는다 (실패 은폐 부작용만 있음).
+        run: |
+          set +e
+          python main.py
+          code=$?
+          echo "main.py exit code: $code"
+          if [ "$code" -ge 2 ]; then exit "$code"; fi
+          exit 0
+
+      - name: Upload backups artifact
+        if: always()  # 성공/실패 무관하게 백업 업로드
+        uses: actions/upload-artifact@v6
+        with:
+          name: backups-${{ github.run_id }}
+          path: backups/
+          if-no-files-found: ignore
+          retention-days: 30
