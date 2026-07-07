@@ -1,6 +1,26 @@
 # Daily News Briefing
 
-매일 아침 한국 주요 매체 RSS를 수집·분석하여 Notion DB에 자동 보고서를 게시하고 Slack으로 알림을 발송.
+매일 아침 한국 주요 매체 RSS를 수집·분석하여 Notion DB에 자동 보고서를 게시하고 Slack으로 알림을 발송. 산출물 형태는 [sample_output.md](sample_output.md)(가상 데이터) 참조.
+
+## 기술 스택
+
+| 영역 | 기술 |
+|---|---|
+| 언어·런타임 | Python 3.11 |
+| 수집 | feedparser (RSS) · trafilatura / BeautifulSoup (본문 추출, 3단계 폴백) |
+| LLM | Gemini 2.5 Flash (분류·분석) → GPT-5 mini 자동 폴백 |
+| 렌더링·게시 | Jinja2 → Notion API (블록 변환·DB row) · Slack Incoming Webhook |
+| 운영 | GitHub Actions (일일 cron, 스냅샷 복원, 백업 아티팩트) |
+| 테스트 | 표준 라이브러리 기반 회귀 테스트 21파일 — push마다 CI 실행 |
+
+## 설계 하이라이트
+
+- **출처 무결성** — LLM은 기사 인덱스 배열만 출력하고 매체명·링크는 코드가 결정론적으로 매핑. 출처 환각을 원천 차단 ([ADR-001](ADR.md))
+- **재실행 결정론** — 수집 윈도우를 실행 시각이 아닌 cron 예정 시각 기준으로 고정하고, 수집·분류 표본을 스냅샷으로 보존. 실패 후 재실행해도 같은 표본으로 재개 ([ADR-015](ADR.md))
+- **실패의 타입화** — 분류 부분실패를 정상값으로 세탁하지 않고 '미해결' 상태로 분리, 재실행 시 미해결 부분집합만 회복 재분류 ([ADR-017](ADR.md))
+- **책임 있는 수집** — robots.txt 준수, 분석에 쓰이는 선별 후보만 본문 크롤링, 저장·산출물에 본문 미포함 ([ADR-018](ADR.md)/[019](ADR.md))
+- **겹겹의 폴백** — LLM 폴백(Gemini→GPT-5 mini), 본문 실패 시 요약 폴백, Notion 실패 시 로컬 백업 + 아티팩트 보존. 단계 실패가 파이프라인을 멈추지 않음
+- **운영 기록 문화** — 설계 결정 19건([ADR.md](ADR.md)), 실사고 기반 문제 카탈로그([TROUBLESHOOTING.md](TROUBLESHOOTING.md)), 결함 배경을 docstring에 담은 회귀 테스트
 
 ## 아키텍처
 
