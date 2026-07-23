@@ -95,13 +95,28 @@ def keyword_frequency(
     return counter.most_common()
 
 
-def _fmt_pairs(pairs: List[tuple]) -> str:
-    return ", ".join(f"{name} {n}" for name, n in pairs)
+def _fmt_pairs(pairs: List[tuple], prev: Optional[Dict[str, int]] = None) -> str:
+    """(name, count) 목록을 "name N" 문자열로. prev가 있으면 증감을 병기.
+
+    증감은 0이 아닐 때만 표기(신호 강조). 전일에 없던 항목은 현재값이 곧 증가폭.
+    """
+    parts: List[str] = []
+    for name, n in pairs:
+        if prev is not None:
+            d = n - prev.get(name, 0)
+            parts.append(f"{name} {n} ({d:+d})" if d != 0 else f"{name} {n}")
+        else:
+            parts.append(f"{name} {n}")
+    return ", ".join(parts)
 
 
-def build_data_profile(articles: List[Any]) -> str:
+def build_data_profile(
+    articles: List[Any],
+    prev_articles: Optional[List[Any]] = None,
+) -> str:
     """수집·분류 완료 풀에서 데이터 프로필 텍스트 블록 생성.
 
+    prev_articles(전일 스냅샷 복원 기사)가 있으면 분야·키워드에 전일 대비 증감 병기.
     비어 있거나 집계할 게 없으면 빈 문자열 반환 (호출자가 프롬프트에서 생략).
     """
     if not articles:
@@ -113,19 +128,24 @@ def build_data_profile(articles: List[Any]) -> str:
     if not cat_dist and not media_dist and not kw_freq:
         return ""
 
+    # 전일 대비: 스냅샷은 제목·분야를 보존하므로 분야·키워드 집계 가능(본문 불필요).
+    prev_cat = dict(_category_distribution(prev_articles)) if prev_articles else None
+    prev_kw = dict(keyword_frequency(prev_articles)) if prev_articles else None
+    delta_note = " — 괄호는 전일 대비 증감" if prev_articles else ""
+
     total = len(articles)
     lines: List[str] = [
         "[오늘의 데이터 프로필]",
         "아래 수치는 코드가 집계한 사실이다. 인사이트·함의의 근거로 이 숫자를 인용하되,",
-        "여기 없는 수치는 만들지 말 것. (분석 대상으로 선별되기 전, 수집·분류된 전체 풀 기준)",
+        f"여기 없는 수치는 만들지 말 것. (분석 대상 선별 전, 수집·분류된 전체 풀 기준{delta_note})",
     ]
     if cat_dist:
-        lines.append(f"· 분야별 기사 수 (총 {total}건): {_fmt_pairs(cat_dist)}")
+        lines.append(f"· 분야별 기사 수 (총 {total}건): {_fmt_pairs(cat_dist, prev_cat)}")
     if media_dist:
         lines.append(f"· 매체별 기사 수: {_fmt_pairs(media_dist)}")
     if kw_freq:
         lines.append(
             f"· 주요 키워드 빈도(제목 기준, 상위 {_KEYWORD_TOP_N}): "
-            f"{_fmt_pairs(kw_freq[:_KEYWORD_TOP_N])}"
+            f"{_fmt_pairs(kw_freq[:_KEYWORD_TOP_N], prev_kw)}"
         )
     return "\n".join(lines)

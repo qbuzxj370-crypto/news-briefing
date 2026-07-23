@@ -20,6 +20,7 @@ from __future__ import annotations
 import os
 import sys
 import traceback
+from datetime import datetime, timedelta
 
 from timewindow import target_date_str
 from collectors import (
@@ -40,6 +41,11 @@ from snapshot import save_snapshot, load_snapshot
 
 # 분석 대상 분야 (FALLBACK_CATEGORY="기타"는 분석에서 제외)
 ANALYSIS_CATEGORIES = [c for c in VALID_CATEGORIES if c != FALLBACK_CATEGORY]
+
+
+def _prev_date_str(date_str: str) -> str:
+    """'YYYY-MM-DD'의 전일 문자열. 전일 스냅샷 조회(데이터 프로필 증감)용."""
+    return (datetime.strptime(date_str, "%Y-%m-%d") - timedelta(days=1)).strftime("%Y-%m-%d")
 
 
 def recover_unresolved(llm, all_articles) -> int:
@@ -216,7 +222,11 @@ def main() -> int:
     print("\n[4] LLM 분석")
     # 데이터 프로필: 선별 전 전체 분류 풀(all_articles) 기준 분포·빈도를 집계해
     # 프롬프트에 주입. LLM은 이 수치를 인용만 하고 새 숫자는 만들지 않는다.
-    data_profile = build_data_profile(all_articles)
+    # 전일 스냅샷이 backups/에 있으면(daily.yml 복원 스텝) 전일 대비 증감도 병기.
+    prev_articles = load_snapshot(_prev_date_str(date_str))
+    if prev_articles:
+        print(f"  전일 대비: {_prev_date_str(date_str)} 스냅샷 {len(prev_articles)}건 로드")
+    data_profile = build_data_profile(all_articles, prev_articles=prev_articles)
     try:
         # llm은 [2] 단계에서 이미 생성됨
         result = analyze(llm, article_data, data_profile=data_profile)
