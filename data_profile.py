@@ -16,7 +16,44 @@
 from __future__ import annotations
 
 from collections import Counter
-from typing import Any, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
+
+
+# 도메인 키워드 사전 (표제어 → 표기 변이들). 제목에 변이 중 하나라도 있으면 1건.
+# 형태소 분석기(kiwipiepy) 대신 큐레이션 목록을 쓰는 이유: 결정론적이고, 과분할
+# 노이즈가 없으며, 무엇을 세는지 명시적이라 유지보수가 투명하고, CI에 무의존.
+# 소규모 도메인 지식 자산 — 운영하며 표제어를 추가/조정한다.
+# 주의: 부분 문자열 매칭이라 드물게 오탐 가능(예: 영문 'AI'가 긴 영단어 내부).
+# 한국 기사 제목은 대부분 한글이라 실무 영향은 미미. 표제어는 이 트레이드오프를
+# 감안해 변별력 있는 것만 담는다.
+DOMAIN_TERMS: Dict[str, Tuple[str, ...]] = {
+    "AI": ("AI", "인공지능", "생성형", "LLM"),
+    "반도체": ("반도체", "칩"),
+    "HBM": ("HBM",),
+    "데이터센터": ("데이터센터", "IDC"),
+    "전력": ("전력", "전기요금"),
+    "원전": ("원전", "원자력", "SMR"),
+    "배터리": ("배터리", "이차전지", "2차전지"),
+    "환율": ("환율", "원/달러", "원달러"),
+    "금리": ("금리",),
+    "부동산": ("부동산", "아파트", "집값", "전세"),
+    "증시": ("코스피", "코스닥", "증시", "주가"),
+    "수출": ("수출",),
+    "관세": ("관세",),
+    "공급망": ("공급망", "희토류"),
+    "중국": ("중국",),
+    "미국": ("미국", "트럼프"),
+    "북한": ("북한",),
+    "국회": ("국회", "여야", "예산안"),
+    "대통령": ("대통령", "대통령실"),
+    "검찰": ("검찰", "특검"),
+    "노동": ("노동", "노조", "파업"),
+    "의료": ("의료", "의대", "병원"),
+    "연금": ("연금",),
+}
+
+# 프로필에 노출할 상위 키워드 수 (프롬프트 길이 제어).
+_KEYWORD_TOP_N = 12
 
 
 def _category_distribution(articles: Iterable[Any]) -> List[tuple]:
@@ -39,6 +76,25 @@ def _media_distribution(articles: Iterable[Any]) -> List[tuple]:
     return counter.most_common()
 
 
+def keyword_frequency(
+    articles: Iterable[Any],
+    terms: Dict[str, Tuple[str, ...]] = DOMAIN_TERMS,
+) -> List[tuple]:
+    """제목에 도메인 키워드가 등장한 기사 수를 (표제어, 건수) 내림차순으로.
+
+    한 기사가 여러 표제어에 걸릴 수 있다(주제 중첩 — 분할이 아니라 관심도 측정).
+    한 표제어의 변이가 제목에 여러 번 나와도 그 기사는 1건으로 센다.
+    count 0인 표제어는 제외.
+    """
+    counter: Counter = Counter()
+    for a in articles:
+        title = getattr(a, "title", "") or ""
+        for canonical, variants in terms.items():
+            if any(v in title for v in variants):
+                counter[canonical] += 1
+    return counter.most_common()
+
+
 def _fmt_pairs(pairs: List[tuple]) -> str:
     return ", ".join(f"{name} {n}" for name, n in pairs)
 
@@ -53,7 +109,8 @@ def build_data_profile(articles: List[Any]) -> str:
 
     cat_dist = _category_distribution(articles)
     media_dist = _media_distribution(articles)
-    if not cat_dist and not media_dist:
+    kw_freq = keyword_frequency(articles)
+    if not cat_dist and not media_dist and not kw_freq:
         return ""
 
     total = len(articles)
@@ -66,4 +123,9 @@ def build_data_profile(articles: List[Any]) -> str:
         lines.append(f"· 분야별 기사 수 (총 {total}건): {_fmt_pairs(cat_dist)}")
     if media_dist:
         lines.append(f"· 매체별 기사 수: {_fmt_pairs(media_dist)}")
+    if kw_freq:
+        lines.append(
+            f"· 주요 키워드 빈도(제목 기준, 상위 {_KEYWORD_TOP_N}): "
+            f"{_fmt_pairs(kw_freq[:_KEYWORD_TOP_N])}"
+        )
     return "\n".join(lines)
