@@ -49,6 +49,23 @@ def test_valid_passes_and_fills_defaults():
     assert cat["has_sufficient_data"] is True
     assert cat["key_flows"] == []
     assert cat["deep_issues"][0]["referenced_article_ids"] == [1, 2]
+    # confidence 누락 시 기본값 "중간"
+    assert cat["deep_issues"][0]["confidence"] == "중간"
+
+
+def test_confidence_normalized():
+    """confidence는 허용값만 통과, 오타·타입오류·누락은 '중간'으로 정규화."""
+    data = _minimal_analysis()
+    data["categories"][0]["deep_issues"] = [
+        {"title": "a", "confidence": "높음", "referenced_article_ids": [1]},
+        {"title": "b", "confidence": "판단유보", "referenced_article_ids": [1]},
+        {"title": "c", "confidence": "매우높음", "referenced_article_ids": [1]},  # 오타
+        {"title": "d", "confidence": 5, "referenced_article_ids": [1]},          # 타입오류
+        {"title": "e", "referenced_article_ids": [1]},                            # 누락
+    ]
+    out = _validate_analysis(data, valid_ids={1})
+    got = [i["confidence"] for i in out["categories"][0]["deep_issues"]]
+    assert got == ["높음", "판단유보", "중간", "중간", "중간"], got
 
 
 def test_top_level_not_dict_raises():
@@ -130,6 +147,7 @@ if __name__ == "__main__":
     failures = 0
     tests = [
         test_valid_passes_and_fills_defaults,
+        test_confidence_normalized,
         test_top_level_not_dict_raises,
         test_missing_mega_trend_raises,
         test_missing_summary_raises,
