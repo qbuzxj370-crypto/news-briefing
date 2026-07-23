@@ -32,6 +32,7 @@ from analyzer import analyze, AnalysisValidationError
 from classifier import classify, VALID_CATEGORIES, FALLBACK_CATEGORY
 from llm import get_llm
 from renderer import render_report
+from data_profile import build_data_profile
 from notion_writer import upload_to_notion, save_local_backup
 from slack_writer import send_slack_briefing, send_slack_error
 from snapshot import save_snapshot, load_snapshot
@@ -213,9 +214,12 @@ def main() -> int:
     # 4) LLM 분석
     # ------------------------------------------------------------------
     print("\n[4] LLM 분석")
+    # 데이터 프로필: 선별 전 전체 분류 풀(all_articles) 기준 분포·빈도를 집계해
+    # 프롬프트에 주입. LLM은 이 수치를 인용만 하고 새 숫자는 만들지 않는다.
+    data_profile = build_data_profile(all_articles)
     try:
         # llm은 [2] 단계에서 이미 생성됨
-        result = analyze(llm, article_data)
+        result = analyze(llm, article_data, data_profile=data_profile)
     except AnalysisValidationError as e:
         print(f"\n[치명 오류] LLM 출력 검증 실패: {e}")
         traceback.print_exc()

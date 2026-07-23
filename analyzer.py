@@ -346,6 +346,7 @@ def _print_source_coverage(analysis: Dict[str, Any]) -> None:
 def analyze(
     llm: LLMWithFallback,
     article_data: Dict[str, List[Article]],
+    data_profile: Optional[str] = None,
 ) -> Dict[str, Any]:
     """LLM에 JSON 분석 요청 후 검증된 결과 반환.
 
@@ -372,6 +373,10 @@ def analyze(
     articles_block, id_to_article = _format_articles(article_data)
     valid_ids = set(id_to_article.keys())
 
+    # 데이터 프로필(분포·빈도·전일 대비)은 코드가 집계한 사실. 있으면 스키마 앞에
+    # 주입해 인사이트가 '관찰(수치) → 해석 → 한계'를 갖추게 한다 (환각 수치 차단).
+    profile_block = f"{data_profile.strip()}\n\n---\n\n" if data_profile else ""
+
     user_prompt = (
         f"다음은 어제 한국의 5개 분야 주요 뉴스입니다. 각 기사에 다음 태그가 붙어 있습니다:\n"
         f"- [번호]: 기사 식별자 (분석 결과의 referenced_article_ids에 사용)\n"
@@ -379,6 +384,7 @@ def analyze(
         f"- [경계]: 분야 경계를 넘는 사건 (분류 LLM이 판정). '오늘의 공통 패턴'의 핵심 후보. 한 분야의 deep_issues에서만 다루고 다른 분야에선 공통 패턴에 인용하거나 minor_issues로만 짧게 언급.\n"
         f"\n{articles_block}\n"
         f"\n---\n\n"
+        f"{profile_block}"
         f"위 기사들을 분석하여 아래 JSON 스키마에 정확히 맞는 JSON 객체를 생성하세요.\n"
         f"마크다운, 설명, 코드블록 표시 없이 JSON만 반환합니다.\n\n"
         f"[출력 JSON 스키마]\n{OUTPUT_SCHEMA_DESCRIPTION}\n"
