@@ -98,6 +98,7 @@ OUTPUT_SCHEMA_DESCRIPTION = """{
           "context": "맥락: 왜 지금 일어났나, 어떤 배경이 있나",
           "implication": "함의: 누구에게 어떤 영향",
           "watch_points": "관전 포인트: 앞으로 무엇을 지켜봐야 하나",
+          "confidence": "높음|중간|판단유보",
           "referenced_article_ids": [3, 7]
         }
       ],
@@ -142,6 +143,12 @@ OUTPUT_SCHEMA_DESCRIPTION = """{
     다시 거를 것. 광고성 기사로 칸을 채우면 보고서 신뢰도가 떨어진다.
 - referenced_article_ids: 그 이슈를 분석할 때 참조한 기사의 [번호]만 포함. 정수 배열.
   매체명/링크는 코드가 자동 매핑하므로 본문에 직접 쓸 필요 없음.
+- confidence: 이 분석의 확신도. 셋 중 하나만 사용.
+  - "높음": 참조 기사 2건 이상 + 사실 기반 서술, 추측 거의 없음
+  - "중간": 참조는 있으나 함의·관전 포인트에 해석·추정이 섞임 (기본값)
+  - "판단유보": 참조 기사 1건 이하이거나 근거가 얇아 단정이 위험. 이 경우 watch_points에
+    "추가 데이터 필요" 취지를 명시하고, implication에서 확신 표현("~할 것이다") 대신
+    "~일 가능성", "현재 기사만으론 판단 어려움"을 쓴다.
 - has_sufficient_data: 본문 확보 기사가 충분(2건 이상)하면 true, 부족하면 false
 - limitation_note: has_sufficient_data가 false일 때만 한 줄 설명. true면 null."""
 
@@ -181,6 +188,10 @@ def _format_articles(
 # ----------------------------------------------------------------------
 class AnalysisValidationError(Exception):
     """LLM 출력 JSON이 스키마를 만족하지 않음."""
+
+
+# deep_issue.confidence 허용값. 이 외 값(누락·오타)은 "중간"으로 정규화.
+_VALID_CONFIDENCE = {"높음", "중간", "판단유보"}
 
 
 def _validate_analysis(data: Any, valid_ids: set) -> Dict[str, Any]:
@@ -229,6 +240,9 @@ def _validate_analysis(data: Any, valid_ids: set) -> Dict[str, Any]:
             issue.setdefault("context", "")
             issue.setdefault("implication", "")
             issue.setdefault("watch_points", "")
+            # confidence: 셋 중 하나로 강제. 누락·오타·타입오류는 "중간"으로 정규화.
+            if issue.get("confidence") not in _VALID_CONFIDENCE:
+                issue["confidence"] = "중간"
             raw_ids = issue.get("referenced_article_ids", []) or []
             issue["referenced_article_ids"] = [
                 int(x)
