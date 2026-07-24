@@ -24,25 +24,35 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      # 재실행 대비: 같은 날 앞선 실행의 수집·분류 스냅샷(*_snapshot.json)을
-      # 백업 아티팩트에서 복원. 늦은 재실행은 RSS 피드 top-N이 갱신되어
-      # 1차 표본을 잃으므로(2026-06-11 관찰), 스냅샷이 있으면 main.py가
-      # 수집·분류를 건너뛰고 동일 표본으로 분석부터 재개한다.
-      # 다른 날짜의 스냅샷은 main.py가 무시하므로 최근 실행 것을 받아도 무해.
-      - name: Restore snapshot from previous run
+      # 최근 실행들의 수집·분류 스냅샷(*_snapshot.json)을 백업 아티팩트에서 복원.
+      # 두 용도로 쓰인다:
+      #   (1) 재실행 재개: 같은 대상 날짜 스냅샷이 있으면 main.py가 수집·분류를
+      #       건너뛰고 동일 표본으로 분석부터 재개(늦은 재실행의 표본 드리프트 방지,
+      #       2026-06-11 관찰: 재실행에서 314건→127건).
+      #   (2) 전일 대비 데이터 프로필: 전일(대상날짜-1) 스냅샷이 있으면 분야·키워드
+      #       증감을 프롬프트에 병기.
+      # 두 스냅샷은 서로 다른 실행 아티팩트에 있으므로, 첫 성공에서 멈추지 않고
+      # 최근 몇 개를 스캔해 누적한다(날짜명 파일이라 덮어쓰기 충돌 없음).
+      # main.py는 필요한 날짜 스냅샷만 골라 쓰고 나머지는 무시한다.
+      - name: Restore snapshots from recent runs
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           mkdir -p backups
-          for id in $(gh run list --workflow daily.yml --limit 5 --json databaseId --jq '.[].databaseId'); do
+          collected=0
+          for id in $(gh run list --workflow daily.yml --limit 6 --json databaseId --jq '.[].databaseId'); do
             [ "$id" = "${{ github.run_id }}" ] && continue
             if timeout 30 gh run download "$id" --name "backups-$id" --dir /tmp/prev_backup 2>/dev/null; then
-              cp /tmp/prev_backup/*_snapshot.json backups/ 2>/dev/null \
-                && echo "스냅샷 복원: run $id" \
-                || echo "run $id 아티팩트에 스냅샷 없음"
+              if cp /tmp/prev_backup/*_snapshot.json backups/ 2>/dev/null; then
+                echo "스냅샷 복원: run $id"
+                collected=$((collected + 1))
+              else
+                echo "run $id 아티팩트에 스냅샷 없음"
+              fi
               rm -rf /tmp/prev_backup
-              break
             fi
+            # 재개용 + 전일용 2개 확보하면 충분 (시간 절약)
+            [ "$collected" -ge 2 ] && break
           done
           ls backups/ 2>/dev/null || true
 

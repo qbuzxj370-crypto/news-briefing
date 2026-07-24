@@ -123,6 +123,8 @@ def _build_template_context(
         for issue in cat.get("deep_issues", []):
             deep_with_sources.append({
                 **issue,
+                # confidence는 issue에 이미 포함(**issue). 누락 대비 기본값만 보강.
+                "confidence": issue.get("confidence", "중간"),
                 "sources": _map_sources(
                     issue.get("referenced_article_ids", []),
                     id_to_article,
@@ -292,6 +294,7 @@ if __name__ == "__main__":
                         "context": "엔비디아 차세대 칩 일정에 맞춘 공급 확보 경쟁의 일환.",
                         "implication": "HBM 시장 점유율 재편 가능성. 메모리 사이클 회복 신호.",
                         "watch_points": "수율 안정화 시점, 엔비디아 공식 채택 발표 여부.",
+                        "confidence": "높음",
                         "referenced_article_ids": [1, 2]
                     }
                 ],

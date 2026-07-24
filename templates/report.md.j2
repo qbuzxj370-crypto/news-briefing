@@ -28,7 +28,7 @@
 
 ---
 
-## 🌐 오늘의 메가 트렌드
+## 🌐 오늘의 공통 패턴
 
 {{ mega_trend.summary.strip() }}
 
@@ -65,6 +65,7 @@
    - **맥락**: {{ issue.context }}
    - **함의**: {{ issue.implication }}
    - **관전 포인트**: {{ issue.watch_points }}
+   - **신뢰도**: {% if issue.confidence == '높음' %}🟢 높음{% elif issue.confidence == '판단유보' %}🔴 판단유보{% else %}🟡 중간{% endif %}
    {%- if issue.sources %}
 
    📰 관련 기사
