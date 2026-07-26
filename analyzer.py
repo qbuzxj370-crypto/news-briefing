@@ -9,6 +9,7 @@ LLM의 책임: 분석 데이터(구조화된 JSON) 생성만
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Dict, List, Optional
 
 from collectors import Article
@@ -55,12 +56,14 @@ SYSTEM_PROMPT = """당신은 20년 경력의 전문 애널리스트입니다. �
 
 [전문가 인사이트 작성 규칙]
 - 일반론·격언·당위론 금지. ("~가 중요하다", "~를 주목해야 한다" 같은 추상적 문장 지양)
-- **구조: 관찰 → 해석 → 한계 순으로 작성한다.**
-  - 관찰: 데이터 프로필의 수치(제공되면) 또는 입력 기사의 구체적 사실 1~2개를 의미 단어로 지칭.
-    (예: "이번 기사군에서 AI 모델보다 인프라 관련 기사가 많았다", "캐나다 알루미늄 사례에서")
-  - 해석: 그 관찰이 무엇을 시사하는지 한 갈래(아래 A/B/C) 선택해 서술.
-  - 한계: 근거가 하루치이거나 표본이 얇으면 "며칠 더 확인 필요", "추가 데이터 필요"로 마무리.
-    확신이 정당한 경우엔 한계 절을 생략해도 된다.
+- insight는 문자열이 아니라 **observation / interpretation / limitation 3개 필드를 가진 객체**다.
+  - **observation(관찰)**: 위 [오늘의 데이터 프로필]의 수치를 **직접 인용**한다.
+    **숫자를 반드시 포함할 것** — "AI 18건, 반도체 7건으로 인프라 관련 기사가 배 이상 많았다"처럼
+    구체적 수치를 적는다. "관심이 두드러졌다" 같은 인상 서술은 관찰이 아니다.
+    프로필이 제공되지 않은 경우에만 입력 기사의 구체적 사실(건수·금액·비율)로 대체한다.
+  - **interpretation(해석)**: 그 관찰이 무엇을 시사하는지. 아래 갈래 A/B/C 중 하나를 선택.
+  - **limitation(한계)**: 근거의 제약을 명시한다. "하루치 표본이라 추세로 단정하기 어렵다",
+    "며칠 더 확인 필요" 등. 확신이 정당한 경우에만 빈 문자열("")을 넣는다.
 - **insight 본문에는 article_id 표기([46], `[42]`, (`[37]`) 등 어떤 형태로도) 절대 쓰지 않는다.** insight는 deep_issues·minor_issues와 달리 referenced_article_ids 필드가 없고 종합 통찰이라 개별 출처 표시가 불필요하다.
 
 [인사이트 작성 갈래 — 매번 다른 갈래 선택]
@@ -120,7 +123,11 @@ OUTPUT_SCHEMA_DESCRIPTION = """{
           "referenced_article_ids": [12]
         }
       ],
-      "insight": "전문가 인사이트: 표면 뉴스에 가려진 구조적 변화, 다른 분야와의 연결고리 등 1~2가지."
+      "insight": {
+        "observation": "관찰: 데이터 프로필의 수치를 인용한 사실 서술. 숫자를 반드시 포함한다.",
+        "interpretation": "해석: 그 관찰이 무엇을 시사하는지 (갈래 A/B/C 중 하나)",
+        "limitation": "한계: 근거의 제약. 하루치·표본 부족 등. 확신이 정당하면 빈 문자열."
+      }
     }
   ]
 }
@@ -217,6 +224,23 @@ _CONF_REFS_MEDIUM = 2     # 이 수 이상이면 "중간", 미만(0~1건)은 "�
 _CONF_CHARS_PER_REF = 300  # 참조 1건당 서술 길이 상한 — 초과 시 한 단계 강등
 
 
+def _normalize_insight(raw: Any) -> Dict[str, str]:
+    """insight를 {observation, interpretation, limitation} 3필드로 정규화.
+
+    LLM이 구 형식(문자열)으로 회귀해도 파이프라인이 멈추지 않게 한다 —
+    문자열이면 전체를 interpretation으로 보고 관찰·한계는 빈 값으로 둔다
+    (그 경우 수치 인용 경고가 뜨므로 회귀 자체는 로그로 드러난다).
+    """
+    if isinstance(raw, dict):
+        return {
+            k: str(raw.get(k, "") or "").strip()
+            for k in ("observation", "interpretation", "limitation")
+        }
+    if isinstance(raw, str):
+        return {"observation": "", "interpretation": raw.strip(), "limitation": ""}
+    return {"observation": "", "interpretation": "", "limitation": ""}
+
+
 def compute_confidence(ref_count: int, body_len: int) -> str:
     """참조 기사 수 + 서술 길이로 deep_issue 신뢰도를 결정론적으로 산출.
 
@@ -270,7 +294,7 @@ def _validate_analysis(data: Any, valid_ids: set) -> Dict[str, Any]:
         cat.setdefault("key_flows", [])
         cat.setdefault("deep_issues", [])
         cat.setdefault("minor_issues", [])
-        cat.setdefault("insight", "")
+        cat["insight"] = _normalize_insight(cat.get("insight"))
 
         # key_flows: 문자열 배열 보장
         cat["key_flows"] = [str(x) for x in cat["key_flows"] if isinstance(x, str)]
@@ -362,6 +386,58 @@ def source_coverage_stats(analysis: Dict[str, Any]) -> Dict[str, Any]:
         "avg_refs": (sum(counts) / total) if total else 0.0,
         "low_ref_long": low_ref_long,
     }
+
+
+# insight.observation의 수치 인용 검사용. 아라비아 숫자 1개 이상이면 인용으로 본다.
+_DIGIT_RE = re.compile(r"\d")
+
+
+def insight_grounding_stats(analysis: Dict[str, Any]) -> Dict[str, Any]:
+    """insight가 관찰(수치)·한계를 실제로 갖췄는지 집계.
+
+    배경(2026-07-25 운영): 프롬프트로 "관찰 → 해석 → 한계"를 요구했더니
+    5개 분야 모두 관찰 프레이밍은 채택했으나 **수치 인용 0건**, 한계 절은
+    5개 중 1개뿐이었다. 프롬프트 요구는 지켜졌는지 검증되지 않으면 조용히
+    무시되므로, 코드가 세어 로그로 드러낸다 (check_misc_ratio와 같은 관측 장치).
+
+    Returns:
+        {"total": 인사이트 있는 분야 수,
+         "no_number": [수치 없는 분야명], "no_limitation": [한계 없는 분야명]}
+    """
+    total = 0
+    no_number: List[str] = []
+    no_limitation: List[str] = []
+    for cat in (analysis or {}).get("categories", []):
+        ins = cat.get("insight")
+        if not isinstance(ins, dict):
+            continue
+        obs = ins.get("observation", "")
+        # 인사이트가 통째로 빈 분야(데이터 부족 등)는 집계 제외
+        if not obs and not ins.get("interpretation"):
+            continue
+        total += 1
+        name = cat.get("name", "")
+        if not _DIGIT_RE.search(obs):
+            no_number.append(name)
+        if not ins.get("limitation"):
+            no_limitation.append(name)
+    return {"total": total, "no_number": no_number, "no_limitation": no_limitation}
+
+
+def _print_insight_grounding(analysis: Dict[str, Any]) -> None:
+    stats = insight_grounding_stats(analysis)
+    if stats["total"] == 0:
+        return
+    n = stats["total"]
+    cited = n - len(stats["no_number"])
+    print(f"  인사이트 근거 지표: 수치 인용 {cited}/{n}분야")
+    if stats["no_number"]:
+        print(
+            f"    [경고] 관찰에 수치 없음: {', '.join(stats['no_number'])} "
+            f"— 데이터 프로필 인용이 무시됨(프롬프트 점검 후보)"
+        )
+    if stats["no_limitation"]:
+        print(f"    [지표] 한계 절 생략: {', '.join(stats['no_limitation'])}")
 
 
 def _print_source_coverage(analysis: Dict[str, Any]) -> None:
@@ -462,6 +538,7 @@ def analyze(
 
     print(f"  ✓ 분석 완료 (사용 모델: {llm.last_used})")
     _print_source_coverage(validated)
+    _print_insight_grounding(validated)
 
     return {
         "analysis": validated,

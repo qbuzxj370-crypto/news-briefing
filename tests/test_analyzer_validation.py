@@ -12,7 +12,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from analyzer import _validate_analysis, AnalysisValidationError
+from analyzer import (
+    _validate_analysis,
+    AnalysisValidationError,
+    insight_grounding_stats,
+)
 
 
 def _minimal_analysis():
@@ -45,7 +49,10 @@ def test_valid_passes_and_fills_defaults():
     del data["categories"][0]["insight"]
     out = _validate_analysis(data, valid_ids={1, 2, 3})
     cat = out["categories"][0]
-    assert cat["insight"] == ""
+    # insight는 누락돼도 3필드 객체로 정규화된다
+    assert cat["insight"] == {
+        "observation": "", "interpretation": "", "limitation": "",
+    }
     assert cat["has_sufficient_data"] is True
     assert cat["key_flows"] == []
     assert cat["deep_issues"][0]["referenced_article_ids"] == [1, 2]
@@ -107,6 +114,67 @@ def test_confidence_downgraded_when_body_too_long_for_refs():
     ]
     out = _validate_analysis(data, valid_ids={1, 2, 3})
     assert out["categories"][0]["deep_issues"][0]["confidence"] == "중간"
+
+
+def test_insight_string_normalized_to_three_fields():
+    """LLM이 구 형식(문자열)으로 회귀해도 3필드로 받아준다 (graceful)."""
+    data = _minimal_analysis()
+    data["categories"][0]["insight"] = "표면 뉴스 뒤의 구조 변화"
+    out = _validate_analysis(data, valid_ids={1, 2})
+    assert out["categories"][0]["insight"] == {
+        "observation": "",
+        "interpretation": "표면 뉴스 뒤의 구조 변화",
+        "limitation": "",
+    }
+
+
+def test_insight_grounding_flags_missing_number_and_limitation():
+    """관찰에 수치가 없거나 한계 절이 비면 분야명을 집계해 경고 대상으로 올린다.
+
+    배경(2026-07-25): 프롬프트로 요구한 수치 인용이 5개 분야 모두 무시됐는데
+    아무도 몰랐다. 코드가 세어 로그로 드러내야 무시가 드러난다.
+    """
+    analysis = {
+        "categories": [
+            {   # 정상: 수치 있음 + 한계 있음
+                "name": "IT",
+                "insight": {
+                    "observation": "AI 18건, 반도체 7건으로 인프라 기사가 많았다",
+                    "interpretation": "관심 이동 신호",
+                    "limitation": "하루치라 단정 어려움",
+                },
+            },
+            {   # 수치 없음 (인상 서술)
+                "name": "정치",
+                "insight": {
+                    "observation": "관심이 두드러졌다",
+                    "interpretation": "해석",
+                    "limitation": "한계",
+                },
+            },
+            {   # 한계 없음
+                "name": "산업",
+                "insight": {
+                    "observation": "기사 3건이 같은 방향",
+                    "interpretation": "해석",
+                    "limitation": "",
+                },
+            },
+            {   # 인사이트 자체가 빈 분야는 집계 제외
+                "name": "사회",
+                "insight": {"observation": "", "interpretation": "", "limitation": ""},
+            },
+        ]
+    }
+    stats = insight_grounding_stats(analysis)
+    assert stats["total"] == 3, stats          # 빈 분야 제외
+    assert stats["no_number"] == ["정치"], stats
+    assert stats["no_limitation"] == ["산업"], stats
+
+
+def test_insight_grounding_safe_on_empty():
+    assert insight_grounding_stats({})["total"] == 0
+    assert insight_grounding_stats(None)["total"] == 0
 
 
 def test_top_level_not_dict_raises():
@@ -191,6 +259,9 @@ if __name__ == "__main__":
         test_confidence_is_computed_not_taken_from_llm,
         test_confidence_uses_valid_ids_only,
         test_confidence_downgraded_when_body_too_long_for_refs,
+        test_insight_string_normalized_to_three_fields,
+        test_insight_grounding_flags_missing_number_and_limitation,
+        test_insight_grounding_safe_on_empty,
         test_top_level_not_dict_raises,
         test_missing_mega_trend_raises,
         test_missing_summary_raises,

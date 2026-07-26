@@ -7,8 +7,9 @@
     mega_trend: {summary, key_threads[]}
     categories: [{name, emoji, has_sufficient_data, limitation_note,
                   key_flows[], deep_issues[], minor_issues[], insight}]
-      각 deep_issue: {title, context, implication, watch_points, sources[]}
+      각 deep_issue: {title, context, implication, watch_points, confidence, sources[]}
       각 minor_issue: {title, summary, implication, sources[]}
+      insight: {observation, interpretation, limitation}  (limitation은 빈 문자열 가능)
       sources[]: [{name, title, url}]  (renderer가 id_to_article에서 미리 매핑)
     source_list_str: "전자신문 · 블로터 · ..."
   
@@ -84,10 +85,18 @@
 {%- endfor %}
 {%- endif %}
 
-{%- if cat.insight %}
+{%- if cat.insight.observation or cat.insight.interpretation %}
 
 ### 💡 전문가 인사이트
-{{ cat.insight.strip() }}
+{%- if cat.insight.observation %}
+- **관찰**: {{ cat.insight.observation }}
+{%- endif %}
+{%- if cat.insight.interpretation %}
+- **해석**: {{ cat.insight.interpretation }}
+{%- endif %}
+{%- if cat.insight.limitation %}
+- **한계**: {{ cat.insight.limitation }}
+{%- endif %}
 {%- endif %}
 {%- endfor %}
 
