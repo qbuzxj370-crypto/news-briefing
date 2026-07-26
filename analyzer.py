@@ -392,6 +392,59 @@ def source_coverage_stats(analysis: Dict[str, Any]) -> Dict[str, Any]:
 _DIGIT_RE = re.compile(r"\d")
 
 
+def source_concentration_stats(
+    analysis: Dict[str, Any],
+    id_to_article: Dict[int, Any],
+) -> List[tuple]:
+    """참조가 2건 이상인데 전부 한 매체인 deep_issue를 찾아 반환.
+
+    배경(2026-07-25 운영): 사회·시사 분야 deep_issue 3건의 출처가 전부 한겨레
+    한 매체였다. 매체별 분포는 데이터 프로필에 있지만 "이 이슈의 근거가 한
+    매체에 쏠렸다"는 신호는 어디에도 없었다. 단일 매체만 근거로 삼으면 그
+    매체의 프레임이 그대로 분석이 되므로(외부 평가 #8 언론사 편향), 관측한다.
+
+    참조 1건은 이미 confidence "판단유보"로 표시되므로 중복 경고하지 않는다 —
+    여기서 잡으려는 건 "여러 건을 봤는데 전부 같은 매체"인 경우다.
+
+    Returns:
+        [(분야명, 이슈 제목, 매체명, 참조수), ...]
+    """
+    flagged: List[tuple] = []
+    for cat in (analysis or {}).get("categories", []):
+        for issue in cat.get("deep_issues", []):
+            ids = issue.get("referenced_article_ids", []) or []
+            if len(ids) < 2:
+                continue
+            sources = {
+                getattr(id_to_article.get(i), "source", None)
+                for i in ids
+            }
+            sources.discard(None)
+            if len(sources) == 1:
+                flagged.append((
+                    cat.get("name", ""),
+                    issue.get("title", ""),
+                    next(iter(sources)),
+                    len(ids),
+                ))
+    return flagged
+
+
+def _print_source_concentration(
+    analysis: Dict[str, Any],
+    id_to_article: Dict[int, Any],
+) -> None:
+    flagged = source_concentration_stats(analysis, id_to_article)
+    if not flagged:
+        return
+    print(f"  출처 편중 지표: 단일 매체 근거 {len(flagged)}건")
+    for cat_name, title, source, n in flagged:
+        print(
+            f"    [지표] {cat_name} — {title}: 참조 {n}건 전부 '{source}' "
+            f"(단일 매체 프레임 반영 가능)"
+        )
+
+
 def insight_grounding_stats(analysis: Dict[str, Any]) -> Dict[str, Any]:
     """insight가 관찰(수치)·한계를 실제로 갖췄는지 집계.
 
@@ -538,6 +591,7 @@ def analyze(
 
     print(f"  ✓ 분석 완료 (사용 모델: {llm.last_used})")
     _print_source_coverage(validated)
+    _print_source_concentration(validated, id_to_article)
     _print_insight_grounding(validated)
 
     return {
