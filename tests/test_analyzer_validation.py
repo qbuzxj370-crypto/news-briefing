@@ -53,19 +53,60 @@ def test_valid_passes_and_fills_defaults():
     assert cat["deep_issues"][0]["confidence"] == "중간"
 
 
-def test_confidence_normalized():
-    """confidence는 허용값만 통과, 오타·타입오류·누락은 '중간'으로 정규화."""
+def test_confidence_is_computed_not_taken_from_llm():
+    """confidence는 코드가 산출한다 — LLM이 보낸 값은 무시하고 덮어쓴다.
+
+    배경(2026-07-25 운영): LLM에게 물었더니 deep_issue 12건 전부 "높음",
+    참조 1건짜리 3건도 "높음"이었다(프롬프트 규칙 위반). 자기평가 확신도는
+    캘리브레이션되지 않으므로 라벨 결정을 코드로 회수했다.
+    """
     data = _minimal_analysis()
     data["categories"][0]["deep_issues"] = [
+        # LLM이 "높음"이라 우겨도 참조 1건이면 판단유보
         {"title": "a", "confidence": "높음", "referenced_article_ids": [1]},
-        {"title": "b", "confidence": "판단유보", "referenced_article_ids": [1]},
-        {"title": "c", "confidence": "매우높음", "referenced_article_ids": [1]},  # 오타
-        {"title": "d", "confidence": 5, "referenced_article_ids": [1]},          # 타입오류
-        {"title": "e", "referenced_article_ids": [1]},                            # 누락
+        # 참조 2건 → 중간
+        {"title": "b", "confidence": "높음", "referenced_article_ids": [1, 2]},
+        # 참조 3건 + 짧은 본문 → 높음
+        {"title": "c", "confidence": "판단유보", "referenced_article_ids": [1, 2, 3]},
+        # 오타·타입오류·누락 모두 무관 — 참조 수만 본다
+        {"title": "d", "confidence": "매우높음", "referenced_article_ids": []},
+        {"title": "e", "confidence": 5, "referenced_article_ids": [1, 2]},
     ]
-    out = _validate_analysis(data, valid_ids={1})
+    out = _validate_analysis(data, valid_ids={1, 2, 3})
     got = [i["confidence"] for i in out["categories"][0]["deep_issues"]]
-    assert got == ["높음", "판단유보", "중간", "중간", "중간"], got
+    assert got == ["판단유보", "중간", "높음", "판단유보", "중간"], got
+
+
+def test_confidence_uses_valid_ids_only():
+    """환각 ID가 제거된 뒤의 '유효' 참조 수로 산출해야 한다.
+
+    ID 3개를 보냈어도 2개가 범위 밖이면 실제 근거는 1건 → 판단유보.
+    """
+    data = _minimal_analysis()
+    data["categories"][0]["deep_issues"] = [
+        {"title": "a", "referenced_article_ids": [1, 99, 100]},
+    ]
+    out = _validate_analysis(data, valid_ids={1, 2, 3})
+    issue = out["categories"][0]["deep_issues"][0]
+    assert issue["referenced_article_ids"] == [1]
+    assert issue["confidence"] == "판단유보", issue["confidence"]
+
+
+def test_confidence_downgraded_when_body_too_long_for_refs():
+    """참조는 3건이어도 참조당 서술이 과하게 길면 '중간'으로 강등."""
+    data = _minimal_analysis()
+    long_body = "가" * 400  # 3필드 합산 1200자 > 300 * 3
+    data["categories"][0]["deep_issues"] = [
+        {
+            "title": "a",
+            "context": long_body,
+            "implication": long_body,
+            "watch_points": long_body,
+            "referenced_article_ids": [1, 2, 3],
+        },
+    ]
+    out = _validate_analysis(data, valid_ids={1, 2, 3})
+    assert out["categories"][0]["deep_issues"][0]["confidence"] == "중간"
 
 
 def test_top_level_not_dict_raises():
@@ -147,7 +188,9 @@ if __name__ == "__main__":
     failures = 0
     tests = [
         test_valid_passes_and_fills_defaults,
-        test_confidence_normalized,
+        test_confidence_is_computed_not_taken_from_llm,
+        test_confidence_uses_valid_ids_only,
+        test_confidence_downgraded_when_body_too_long_for_refs,
         test_top_level_not_dict_raises,
         test_missing_mega_trend_raises,
         test_missing_summary_raises,

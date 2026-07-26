@@ -109,7 +109,6 @@ OUTPUT_SCHEMA_DESCRIPTION = """{
           "context": "맥락: 왜 지금 일어났나, 어떤 배경이 있나",
           "implication": "함의: 누구에게 어떤 영향",
           "watch_points": "관전 포인트: 앞으로 무엇을 지켜봐야 하나",
-          "confidence": "높음|중간|판단유보",
           "referenced_article_ids": [3, 7]
         }
       ],
@@ -154,12 +153,15 @@ OUTPUT_SCHEMA_DESCRIPTION = """{
     다시 거를 것. 광고성 기사로 칸을 채우면 보고서 신뢰도가 떨어진다.
 - referenced_article_ids: 그 이슈를 분석할 때 참조한 기사의 [번호]만 포함. 정수 배열.
   매체명/링크는 코드가 자동 매핑하므로 본문에 직접 쓸 필요 없음.
-- confidence: 이 분석의 확신도. 셋 중 하나만 사용.
-  - "높음": 참조 기사 2건 이상 + 사실 기반 서술, 추측 거의 없음
-  - "중간": 참조는 있으나 함의·관전 포인트에 해석·추정이 섞임 (기본값)
-  - "판단유보": 참조 기사 1건 이하이거나 근거가 얇아 단정이 위험. 이 경우 watch_points에
-    "추가 데이터 필요" 취지를 명시하고, implication에서 확신 표현("~할 것이다") 대신
-    "~일 가능성", "현재 기사만으론 판단 어려움"을 쓴다.
+- confidence(신뢰도)는 **출력하지 않는다** — 참조 기사 수와 서술 길이를 근거로 코드가
+  결정론적으로 산출한다. 대신 아래 서술 규칙을 지킨다:
+  - **참조 기사가 1건뿐인 이슈**: 확신 표현("~할 것이다", "~를 견인할 것") 금지.
+    "~일 가능성", "현재 기사만으로는 판단하기 어렵다"로 쓰고, watch_points에
+    "추가 데이터 필요" 취지를 명시한다.
+  - **참조 기사가 2건 이상인 이슈**: 사실 기반 서술은 단정해도 되나, 해석·추정 부분은
+    추정임을 드러낸다.
+  - 근거가 얇으면 분량을 늘려 메우지 말 것. 짧아도 된다 — 참조 대비 서술이 길면
+    코드가 신뢰도를 낮춰 표시한다.
 - has_sufficient_data: 본문 확보 기사가 충분(2건 이상)하면 true, 부족하면 false
 - limitation_note: has_sufficient_data가 false일 때만 한 줄 설명. true면 null."""
 
@@ -201,8 +203,39 @@ class AnalysisValidationError(Exception):
     """LLM 출력 JSON이 스키마를 만족하지 않음."""
 
 
-# deep_issue.confidence 허용값. 이 외 값(누락·오타)은 "중간"으로 정규화.
+# deep_issue.confidence 허용값 (코드가 산출 — LLM 출력이 아님).
 _VALID_CONFIDENCE = {"높음", "중간", "판단유보"}
+
+# confidence 산출 임계 (2026-07-25 운영 관찰 대응).
+# 배경: 초판은 confidence를 LLM에게 물었는데, 12건 전부 "높음"이 나왔다.
+# 참조 1건짜리 이슈 3건도 "높음" — 프롬프트에 "참조 1건 이하면 판단유보"라고
+# 명시했는데도 어겼다. LLM의 자기평가 확신도는 캘리브레이션되지 않으며
+# ("내 분석에 대한 자신감"으로 해석), 프롬프트로 교정되지 않는 종류의 문제다.
+# 따라서 라벨은 코드가 결정론적으로 산출한다 (ADR-001의 코드 위임 원리 확장).
+_CONF_REFS_HIGH = 3       # 이 수 이상 참조하면 "높음" 후보
+_CONF_REFS_MEDIUM = 2     # 이 수 이상이면 "중간", 미만(0~1건)은 "판단유보"
+_CONF_CHARS_PER_REF = 300  # 참조 1건당 서술 길이 상한 — 초과 시 한 단계 강등
+
+
+def compute_confidence(ref_count: int, body_len: int) -> str:
+    """참조 기사 수 + 서술 길이로 deep_issue 신뢰도를 결정론적으로 산출.
+
+    LLM에게 묻지 않는다 — 자기평가 확신도는 신뢰할 수 없다(위 주석 참조).
+
+    규칙:
+      - 참조 0~1건: "판단유보" (근거 1건으로 단정 불가)
+      - 참조 2건: "중간"
+      - 참조 3건 이상: "높음", 단 참조당 서술이 _CONF_CHARS_PER_REF를 넘으면
+        근거 대비 서술이 과한 것으로 보고 "중간"으로 강등
+    """
+    if ref_count < _CONF_REFS_MEDIUM:
+        return "판단유보"
+    if ref_count < _CONF_REFS_HIGH:
+        return "중간"
+    # 참조는 충분하나 서술이 근거에 비해 과하게 길면 강등
+    if body_len > _CONF_CHARS_PER_REF * ref_count:
+        return "중간"
+    return "높음"
 
 
 def _validate_analysis(data: Any, valid_ids: set) -> Dict[str, Any]:
@@ -251,15 +284,21 @@ def _validate_analysis(data: Any, valid_ids: set) -> Dict[str, Any]:
             issue.setdefault("context", "")
             issue.setdefault("implication", "")
             issue.setdefault("watch_points", "")
-            # confidence: 셋 중 하나로 강제. 누락·오타·타입오류는 "중간"으로 정규화.
-            if issue.get("confidence") not in _VALID_CONFIDENCE:
-                issue["confidence"] = "중간"
             raw_ids = issue.get("referenced_article_ids", []) or []
             issue["referenced_article_ids"] = [
                 int(x)
                 for x in raw_ids
                 if isinstance(x, (int, float)) and int(x) in valid_ids
             ]
+            # confidence는 코드가 산출한다 (LLM이 보낸 값이 있어도 덮어씀).
+            # 반드시 ID 필터링 *이후* — 환각 ID가 제거된 '유효' 참조만 근거로 센다.
+            body_len = sum(
+                len(issue.get(k, "") or "")
+                for k in ("context", "implication", "watch_points")
+            )
+            issue["confidence"] = compute_confidence(
+                len(issue["referenced_article_ids"]), body_len
+            )
             cleaned_deep.append(issue)
         cat["deep_issues"] = cleaned_deep
 
