@@ -9,6 +9,7 @@ LLM의 책임: 분석 데이터(구조화된 JSON) 생성만
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Dict, List, Optional
 
 from collectors import Article
@@ -55,12 +56,14 @@ SYSTEM_PROMPT = """당신은 20년 경력의 전문 애널리스트입니다. �
 
 [전문가 인사이트 작성 규칙]
 - 일반론·격언·당위론 금지. ("~가 중요하다", "~를 주목해야 한다" 같은 추상적 문장 지양)
-- **구조: 관찰 → 해석 → 한계 순으로 작성한다.**
-  - 관찰: 데이터 프로필의 수치(제공되면) 또는 입력 기사의 구체적 사실 1~2개를 의미 단어로 지칭.
-    (예: "이번 기사군에서 AI 모델보다 인프라 관련 기사가 많았다", "캐나다 알루미늄 사례에서")
-  - 해석: 그 관찰이 무엇을 시사하는지 한 갈래(아래 A/B/C) 선택해 서술.
-  - 한계: 근거가 하루치이거나 표본이 얇으면 "며칠 더 확인 필요", "추가 데이터 필요"로 마무리.
-    확신이 정당한 경우엔 한계 절을 생략해도 된다.
+- insight는 문자열이 아니라 **observation / interpretation / limitation 3개 필드를 가진 객체**다.
+  - **observation(관찰)**: 위 [오늘의 데이터 프로필]의 수치를 **직접 인용**한다.
+    **숫자를 반드시 포함할 것** — "AI 18건, 반도체 7건으로 인프라 관련 기사가 배 이상 많았다"처럼
+    구체적 수치를 적는다. "관심이 두드러졌다" 같은 인상 서술은 관찰이 아니다.
+    프로필이 제공되지 않은 경우에만 입력 기사의 구체적 사실(건수·금액·비율)로 대체한다.
+  - **interpretation(해석)**: 그 관찰이 무엇을 시사하는지. 아래 갈래 A/B/C 중 하나를 선택.
+  - **limitation(한계)**: 근거의 제약을 명시한다. "하루치 표본이라 추세로 단정하기 어렵다",
+    "며칠 더 확인 필요" 등. 확신이 정당한 경우에만 빈 문자열("")을 넣는다.
 - **insight 본문에는 article_id 표기([46], `[42]`, (`[37]`) 등 어떤 형태로도) 절대 쓰지 않는다.** insight는 deep_issues·minor_issues와 달리 referenced_article_ids 필드가 없고 종합 통찰이라 개별 출처 표시가 불필요하다.
 
 [인사이트 작성 갈래 — 매번 다른 갈래 선택]
@@ -109,7 +112,6 @@ OUTPUT_SCHEMA_DESCRIPTION = """{
           "context": "맥락: 왜 지금 일어났나, 어떤 배경이 있나",
           "implication": "함의: 누구에게 어떤 영향",
           "watch_points": "관전 포인트: 앞으로 무엇을 지켜봐야 하나",
-          "confidence": "높음|중간|판단유보",
           "referenced_article_ids": [3, 7]
         }
       ],
@@ -121,7 +123,11 @@ OUTPUT_SCHEMA_DESCRIPTION = """{
           "referenced_article_ids": [12]
         }
       ],
-      "insight": "전문가 인사이트: 표면 뉴스에 가려진 구조적 변화, 다른 분야와의 연결고리 등 1~2가지."
+      "insight": {
+        "observation": "관찰: 데이터 프로필의 수치를 인용한 사실 서술. 숫자를 반드시 포함한다.",
+        "interpretation": "해석: 그 관찰이 무엇을 시사하는지 (갈래 A/B/C 중 하나)",
+        "limitation": "한계: 근거의 제약. 하루치·표본 부족 등. 확신이 정당하면 빈 문자열."
+      }
     }
   ]
 }
@@ -154,12 +160,15 @@ OUTPUT_SCHEMA_DESCRIPTION = """{
     다시 거를 것. 광고성 기사로 칸을 채우면 보고서 신뢰도가 떨어진다.
 - referenced_article_ids: 그 이슈를 분석할 때 참조한 기사의 [번호]만 포함. 정수 배열.
   매체명/링크는 코드가 자동 매핑하므로 본문에 직접 쓸 필요 없음.
-- confidence: 이 분석의 확신도. 셋 중 하나만 사용.
-  - "높음": 참조 기사 2건 이상 + 사실 기반 서술, 추측 거의 없음
-  - "중간": 참조는 있으나 함의·관전 포인트에 해석·추정이 섞임 (기본값)
-  - "판단유보": 참조 기사 1건 이하이거나 근거가 얇아 단정이 위험. 이 경우 watch_points에
-    "추가 데이터 필요" 취지를 명시하고, implication에서 확신 표현("~할 것이다") 대신
-    "~일 가능성", "현재 기사만으론 판단 어려움"을 쓴다.
+- confidence(신뢰도)는 **출력하지 않는다** — 참조 기사 수와 서술 길이를 근거로 코드가
+  결정론적으로 산출한다. 대신 아래 서술 규칙을 지킨다:
+  - **참조 기사가 1건뿐인 이슈**: 확신 표현("~할 것이다", "~를 견인할 것") 금지.
+    "~일 가능성", "현재 기사만으로는 판단하기 어렵다"로 쓰고, watch_points에
+    "추가 데이터 필요" 취지를 명시한다.
+  - **참조 기사가 2건 이상인 이슈**: 사실 기반 서술은 단정해도 되나, 해석·추정 부분은
+    추정임을 드러낸다.
+  - 근거가 얇으면 분량을 늘려 메우지 말 것. 짧아도 된다 — 참조 대비 서술이 길면
+    코드가 신뢰도를 낮춰 표시한다.
 - has_sufficient_data: 본문 확보 기사가 충분(2건 이상)하면 true, 부족하면 false
 - limitation_note: has_sufficient_data가 false일 때만 한 줄 설명. true면 null."""
 
@@ -201,8 +210,56 @@ class AnalysisValidationError(Exception):
     """LLM 출력 JSON이 스키마를 만족하지 않음."""
 
 
-# deep_issue.confidence 허용값. 이 외 값(누락·오타)은 "중간"으로 정규화.
+# deep_issue.confidence 허용값 (코드가 산출 — LLM 출력이 아님).
 _VALID_CONFIDENCE = {"높음", "중간", "판단유보"}
+
+# confidence 산출 임계 (2026-07-25 운영 관찰 대응).
+# 배경: 초판은 confidence를 LLM에게 물었는데, 12건 전부 "높음"이 나왔다.
+# 참조 1건짜리 이슈 3건도 "높음" — 프롬프트에 "참조 1건 이하면 판단유보"라고
+# 명시했는데도 어겼다. LLM의 자기평가 확신도는 캘리브레이션되지 않으며
+# ("내 분석에 대한 자신감"으로 해석), 프롬프트로 교정되지 않는 종류의 문제다.
+# 따라서 라벨은 코드가 결정론적으로 산출한다 (ADR-001의 코드 위임 원리 확장).
+_CONF_REFS_HIGH = 3       # 이 수 이상 참조하면 "높음" 후보
+_CONF_REFS_MEDIUM = 2     # 이 수 이상이면 "중간", 미만(0~1건)은 "판단유보"
+_CONF_CHARS_PER_REF = 300  # 참조 1건당 서술 길이 상한 — 초과 시 한 단계 강등
+
+
+def _normalize_insight(raw: Any) -> Dict[str, str]:
+    """insight를 {observation, interpretation, limitation} 3필드로 정규화.
+
+    LLM이 구 형식(문자열)으로 회귀해도 파이프라인이 멈추지 않게 한다 —
+    문자열이면 전체를 interpretation으로 보고 관찰·한계는 빈 값으로 둔다
+    (그 경우 수치 인용 경고가 뜨므로 회귀 자체는 로그로 드러난다).
+    """
+    if isinstance(raw, dict):
+        return {
+            k: str(raw.get(k, "") or "").strip()
+            for k in ("observation", "interpretation", "limitation")
+        }
+    if isinstance(raw, str):
+        return {"observation": "", "interpretation": raw.strip(), "limitation": ""}
+    return {"observation": "", "interpretation": "", "limitation": ""}
+
+
+def compute_confidence(ref_count: int, body_len: int) -> str:
+    """참조 기사 수 + 서술 길이로 deep_issue 신뢰도를 결정론적으로 산출.
+
+    LLM에게 묻지 않는다 — 자기평가 확신도는 신뢰할 수 없다(위 주석 참조).
+
+    규칙:
+      - 참조 0~1건: "판단유보" (근거 1건으로 단정 불가)
+      - 참조 2건: "중간"
+      - 참조 3건 이상: "높음", 단 참조당 서술이 _CONF_CHARS_PER_REF를 넘으면
+        근거 대비 서술이 과한 것으로 보고 "중간"으로 강등
+    """
+    if ref_count < _CONF_REFS_MEDIUM:
+        return "판단유보"
+    if ref_count < _CONF_REFS_HIGH:
+        return "중간"
+    # 참조는 충분하나 서술이 근거에 비해 과하게 길면 강등
+    if body_len > _CONF_CHARS_PER_REF * ref_count:
+        return "중간"
+    return "높음"
 
 
 def _validate_analysis(data: Any, valid_ids: set) -> Dict[str, Any]:
@@ -237,7 +294,7 @@ def _validate_analysis(data: Any, valid_ids: set) -> Dict[str, Any]:
         cat.setdefault("key_flows", [])
         cat.setdefault("deep_issues", [])
         cat.setdefault("minor_issues", [])
-        cat.setdefault("insight", "")
+        cat["insight"] = _normalize_insight(cat.get("insight"))
 
         # key_flows: 문자열 배열 보장
         cat["key_flows"] = [str(x) for x in cat["key_flows"] if isinstance(x, str)]
@@ -251,15 +308,21 @@ def _validate_analysis(data: Any, valid_ids: set) -> Dict[str, Any]:
             issue.setdefault("context", "")
             issue.setdefault("implication", "")
             issue.setdefault("watch_points", "")
-            # confidence: 셋 중 하나로 강제. 누락·오타·타입오류는 "중간"으로 정규화.
-            if issue.get("confidence") not in _VALID_CONFIDENCE:
-                issue["confidence"] = "중간"
             raw_ids = issue.get("referenced_article_ids", []) or []
             issue["referenced_article_ids"] = [
                 int(x)
                 for x in raw_ids
                 if isinstance(x, (int, float)) and int(x) in valid_ids
             ]
+            # confidence는 코드가 산출한다 (LLM이 보낸 값이 있어도 덮어씀).
+            # 반드시 ID 필터링 *이후* — 환각 ID가 제거된 '유효' 참조만 근거로 센다.
+            body_len = sum(
+                len(issue.get(k, "") or "")
+                for k in ("context", "implication", "watch_points")
+            )
+            issue["confidence"] = compute_confidence(
+                len(issue["referenced_article_ids"]), body_len
+            )
             cleaned_deep.append(issue)
         cat["deep_issues"] = cleaned_deep
 
@@ -323,6 +386,111 @@ def source_coverage_stats(analysis: Dict[str, Any]) -> Dict[str, Any]:
         "avg_refs": (sum(counts) / total) if total else 0.0,
         "low_ref_long": low_ref_long,
     }
+
+
+# insight.observation의 수치 인용 검사용. 아라비아 숫자 1개 이상이면 인용으로 본다.
+_DIGIT_RE = re.compile(r"\d")
+
+
+def source_concentration_stats(
+    analysis: Dict[str, Any],
+    id_to_article: Dict[int, Any],
+) -> List[tuple]:
+    """참조가 2건 이상인데 전부 한 매체인 deep_issue를 찾아 반환.
+
+    배경(2026-07-25 운영): 사회·시사 분야 deep_issue 3건의 출처가 전부 한겨레
+    한 매체였다. 매체별 분포는 데이터 프로필에 있지만 "이 이슈의 근거가 한
+    매체에 쏠렸다"는 신호는 어디에도 없었다. 단일 매체만 근거로 삼으면 그
+    매체의 프레임이 그대로 분석이 되므로(외부 평가 #8 언론사 편향), 관측한다.
+
+    참조 1건은 이미 confidence "판단유보"로 표시되므로 중복 경고하지 않는다 —
+    여기서 잡으려는 건 "여러 건을 봤는데 전부 같은 매체"인 경우다.
+
+    Returns:
+        [(분야명, 이슈 제목, 매체명, 참조수), ...]
+    """
+    flagged: List[tuple] = []
+    for cat in (analysis or {}).get("categories", []):
+        for issue in cat.get("deep_issues", []):
+            ids = issue.get("referenced_article_ids", []) or []
+            if len(ids) < 2:
+                continue
+            sources = {
+                getattr(id_to_article.get(i), "source", None)
+                for i in ids
+            }
+            sources.discard(None)
+            if len(sources) == 1:
+                flagged.append((
+                    cat.get("name", ""),
+                    issue.get("title", ""),
+                    next(iter(sources)),
+                    len(ids),
+                ))
+    return flagged
+
+
+def _print_source_concentration(
+    analysis: Dict[str, Any],
+    id_to_article: Dict[int, Any],
+) -> None:
+    flagged = source_concentration_stats(analysis, id_to_article)
+    if not flagged:
+        return
+    print(f"  출처 편중 지표: 단일 매체 근거 {len(flagged)}건")
+    for cat_name, title, source, n in flagged:
+        print(
+            f"    [지표] {cat_name} — {title}: 참조 {n}건 전부 '{source}' "
+            f"(단일 매체 프레임 반영 가능)"
+        )
+
+
+def insight_grounding_stats(analysis: Dict[str, Any]) -> Dict[str, Any]:
+    """insight가 관찰(수치)·한계를 실제로 갖췄는지 집계.
+
+    배경(2026-07-25 운영): 프롬프트로 "관찰 → 해석 → 한계"를 요구했더니
+    5개 분야 모두 관찰 프레이밍은 채택했으나 **수치 인용 0건**, 한계 절은
+    5개 중 1개뿐이었다. 프롬프트 요구는 지켜졌는지 검증되지 않으면 조용히
+    무시되므로, 코드가 세어 로그로 드러낸다 (check_misc_ratio와 같은 관측 장치).
+
+    Returns:
+        {"total": 인사이트 있는 분야 수,
+         "no_number": [수치 없는 분야명], "no_limitation": [한계 없는 분야명]}
+    """
+    total = 0
+    no_number: List[str] = []
+    no_limitation: List[str] = []
+    for cat in (analysis or {}).get("categories", []):
+        ins = cat.get("insight")
+        if not isinstance(ins, dict):
+            continue
+        obs = ins.get("observation", "")
+        # 인사이트가 통째로 빈 분야(데이터 부족 등)는 집계 제외
+        if not obs and not ins.get("interpretation"):
+            continue
+        total += 1
+        name = cat.get("name", "")
+        if not _DIGIT_RE.search(obs):
+            no_number.append(name)
+        if not ins.get("limitation"):
+            no_limitation.append(name)
+    return {"total": total, "no_number": no_number, "no_limitation": no_limitation}
+
+
+def _print_insight_grounding(analysis: Dict[str, Any]) -> None:
+    stats = insight_grounding_stats(analysis)
+    if stats["total"] == 0:
+        return
+    n = stats["total"]
+    cited = n - len(stats["no_number"])
+    print(f"  인사이트 근거 지표: 수치 인용 {cited}/{n}분야")
+    if stats["no_number"]:
+        print(
+            f"    [경고] 관찰에 수치 없음: {', '.join(stats['no_number'])} "
+            f"— 데이터 프로필 인용이 무시됨(프롬프트 점검 후보)"
+        )
+    if stats["no_limitation"]:
+        print(f"    [지표] 한계 절 생략: {', '.join(stats['no_limitation'])}")
 
 
 def _print_source_coverage(analysis: Dict[str, Any]) -> None:
@@ -423,6 +591,8 @@ def analyze(
 
     print(f"  ✓ 분석 완료 (사용 모델: {llm.last_used})")
     _print_source_coverage(validated)
+    _print_source_concentration(validated, id_to_article)
+    _print_insight_grounding(validated)
 
     return {
         "analysis": validated,

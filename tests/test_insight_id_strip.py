@@ -81,9 +81,46 @@ def test_variants_stripped():
         )
 
 
+def test_three_field_insight_cleaned_through_renderer():
+    """insight 3필드(관찰·해석·한계) 각각에 ID 정리가 적용되어야 한다.
+
+    2026-07-25 이후 insight가 문자열 → {observation, interpretation, limitation}
+    객체로 바뀌었다. 필드 하나라도 정리를 빠뜨리면 내부 ID가 그대로 노출되므로
+    렌더러 경로 전체로 회귀를 고정한다.
+    """
+    from renderer import _build_template_context
+
+    analysis = {
+        "tldr": "요약",
+        "mega_trend": {"summary": "흐름", "key_threads": []},
+        "categories": [
+            {
+                "name": "IT·테크·AI",
+                "key_flows": [],
+                "deep_issues": [],
+                "minor_issues": [],
+                "insight": {
+                    "observation": "AI 18건으로 가장 많았다 (`[12]`)",
+                    "interpretation": "인프라로 관심 이동 [7]",
+                    "limitation": "하루치라 단정 어려움 (`[3]`, `[9]`)",
+                },
+            }
+        ],
+    }
+    ctx = _build_template_context("2026-07-25", analysis, {}, [])
+    ins = ctx["categories"][0]["insight"]
+    for field, value in ins.items():
+        assert "[" not in value and "]" not in value, f"{field}에 ID 잔존: {value}"
+    # 내용 자체는 보존되어야 한다 (통째 삭제 아님)
+    assert "AI 18건" in ins["observation"], ins["observation"]
+    assert "인프라로 관심 이동" in ins["interpretation"], ins["interpretation"]
+    assert "하루치라 단정 어려움" in ins["limitation"], ins["limitation"]
+
+
 if __name__ == "__main__":
     failures = 0
-    for fn in [test_leak_cases_stripped, test_normal_unchanged, test_variants_stripped]:
+    for fn in [test_leak_cases_stripped, test_normal_unchanged, test_variants_stripped,
+               test_three_field_insight_cleaned_through_renderer]:
         try:
             fn()
             print(f"  PASS: {fn.__name__}")

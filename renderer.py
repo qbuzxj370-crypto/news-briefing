@@ -63,6 +63,22 @@ def _clean_insight_ids(text: str) -> str:
     return text.strip()
 
 
+def _clean_insight(raw: Any) -> Dict[str, str]:
+    """insight 3필드(observation·interpretation·limitation) 각각에 ID 누출 정리 적용.
+
+    analyzer._normalize_insight가 dict를 보장하지만, renderer는 목업·구 데이터로도
+    호출될 수 있어 문자열이면 interpretation으로 받아준다 (graceful).
+    """
+    if isinstance(raw, str):
+        raw = {"observation": "", "interpretation": raw, "limitation": ""}
+    elif not isinstance(raw, dict):
+        raw = {}
+    return {
+        k: _clean_insight_ids(str(raw.get(k, "") or ""))
+        for k in ("observation", "interpretation", "limitation")
+    }
+
+
 def _sanitize_link_text(text: str) -> str:
     """Notion 인라인 파서가 [text](url) 링크를 깨뜨리지 않도록 링크 텍스트의
     대괄호를 전각 괄호로 치환.
@@ -150,7 +166,7 @@ def _build_template_context(
             "key_flows": cat.get("key_flows", []),
             "deep_issues": deep_with_sources,
             "minor_issues": minor_with_sources,
-            "insight": _clean_insight_ids(cat.get("insight", "")),
+            "insight": _clean_insight(cat.get("insight")),
         })
 
     # tldr·mega_trend도 insight와 같은 자유 서술이라 ID 누출 정리 대상
@@ -306,7 +322,11 @@ if __name__ == "__main__":
                         "referenced_article_ids": [3]
                     }
                 ],
-                "insight": "HBM 양산 경쟁은 단순 메모리 시장을 넘어 AI 인프라 공급망의 권력 재편 신호다."
+                "insight": {
+                    "observation": "이번 기사군에서 HBM 관련 기사가 5건으로 AI 모델 기사(2건)의 배 이상이었다.",
+                    "interpretation": "관심이 모델 성능 경쟁에서 공급망·인프라로 이동하는 신호일 수 있다.",
+                    "limitation": "하루치 표본이라 추세로 단정하기 어렵다 — 며칠 더 확인 필요.",
+                }
             },
             {
                 "name": "경제·금융·증시",
@@ -315,7 +335,7 @@ if __name__ == "__main__":
                 "key_flows": ["환율 변동성 확대"],
                 "deep_issues": [],
                 "minor_issues": [],
-                "insight": ""
+                "insight": {"observation": "", "interpretation": "", "limitation": ""}
             }
         ]
     }
