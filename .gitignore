@@ -25,6 +25,9 @@ env/
 # 로컬 백업 (매일 생성됨)
 backups/
 
+# A/B 하네스 입력 캐시·결과 (입력 캐시에 기사 본문 포함 — ADR-019)
+ab_runs/
+
 # IDE / Editor
 .vscode/
 .idea/

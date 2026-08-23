@@ -56,13 +56,19 @@ class LLMProvider(Protocol):
 # Gemini Provider
 # ----------------------------------------------------------------------
 class GeminiProvider:
-    name = "gemini-2.5-flash"
+    name = GEMINI_MODEL
 
-    def __init__(self, api_key: str):
+    def __init__(self, api_key: str, model: str = GEMINI_MODEL):
         # google-genai (신 SDK) 사용
         from google import genai
         self._client = genai.Client(api_key=api_key)
         self._genai = genai
+        # 모델을 인스턴스 단위로 고정한다. 기본값은 운영 모델(GEMINI_MODEL)이라
+        # 기존 호출부는 그대로 동작하고, ab_probe가 다른 모델을 지정해 같은 입력으로
+        # 비교할 수 있다. name도 인스턴스 속성으로 덮어써 로그·Notion '모델' 속성에
+        # 실제 사용 모델이 남는다.
+        self._model = model
+        self.name = model
 
     def generate(
         self,
@@ -94,7 +100,7 @@ class GeminiProvider:
         # SDK 내부 재시도와 별개로, 우리가 backoff를 제어해 폴백 전에 먼저 시도.
         def _call():
             return self._client.models.generate_content(
-                model=GEMINI_MODEL,
+                model=self._model,
                 contents=user,
                 config=config,
             )
