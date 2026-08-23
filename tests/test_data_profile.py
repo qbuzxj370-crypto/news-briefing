@@ -19,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from data_profile import (
     build_data_profile,
     keyword_frequency,
+    keyword_frequency_by_category,
     _category_distribution,
     _media_distribution,
 )
@@ -64,6 +65,45 @@ def test_keyword_variant_counts_article_once():
     assert freq["AI"] == 1, freq
 
 
+def test_keyword_by_category_scoped_to_own_articles():
+    """분야별 키워드는 그 분야 기사만 세어야 한다 (전체 풀 수치 누출 금지).
+
+    배경(2026-07-26 운영): 전체 풀 키워드만 주었더니 인사이트가 "경제 분야
+    25건, AI 키워드 31건"처럼 산술 모순을 냈다. 분야 건수를 넘는 키워드 수가
+    나오지 않아야 한다.
+    """
+    arts = (
+        [_art(title="AI 반도체", category="IT·테크·AI") for _ in range(5)]
+        + [_art(title="환율 급등", category="경제·금융·증시") for _ in range(2)]
+    )
+    by_cat = dict(keyword_frequency_by_category(arts))
+    it_kw = dict(by_cat["IT·테크·AI"])
+    eco_kw = dict(by_cat["경제·금융·증시"])
+
+    assert it_kw["AI"] == 5 and it_kw["반도체"] == 5
+    # 경제 분야에는 AI 기사가 없으므로 AI 키워드가 잡히면 안 된다
+    assert "AI" not in eco_kw, eco_kw
+    assert eco_kw["환율"] == 2
+    # 어떤 분야든 키워드 건수가 그 분야 기사 수를 넘을 수 없다
+    cat_counts = dict(_category_distribution(arts))
+    for cat, freq in keyword_frequency_by_category(arts):
+        for kw, n in freq:
+            assert n <= cat_counts[cat], f"{cat}/{kw}: {n} > {cat_counts[cat]}"
+
+
+def test_profile_labels_scope_and_lists_categories():
+    """프로필이 전체 풀/분야별 스코프를 라벨로 구분해 표기한다."""
+    arts = (
+        [_art(title="AI 반도체", category="IT·테크·AI", source="전자신문") for _ in range(3)]
+        + [_art(title="환율", category="경제·금융·증시", source="한국경제")]
+    )
+    out = build_data_profile(arts)
+    assert "【전체 풀 기준】" in out
+    assert "【분야별 기준】" in out
+    assert "- IT·테크·AI: AI 3, 반도체 3" in out, out
+    assert "- 경제·금융·증시: 환율 1" in out, out
+
+
 def test_build_profile_empty_input():
     assert build_data_profile([]) == ""
 
@@ -77,7 +117,7 @@ def test_build_profile_contains_sections():
     assert "[오늘의 데이터 프로필]" in out
     assert "분야별 기사 수 (총 2건)" in out
     assert "매체별 기사 수" in out
-    assert "주요 키워드 빈도" in out
+    assert "키워드 빈도" in out
     # 전일 없음이면 증감 안내 문구 없음
     assert "전일 대비 증감" not in out
 
@@ -118,6 +158,8 @@ if __name__ == "__main__":
         test_category_and_media_distribution,
         test_keyword_frequency_counts_titles_once,
         test_keyword_variant_counts_article_once,
+        test_keyword_by_category_scoped_to_own_articles,
+        test_profile_labels_scope_and_lists_categories,
         test_build_profile_empty_input,
         test_build_profile_contains_sections,
         test_build_profile_prev_delta,
