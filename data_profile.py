@@ -54,6 +54,8 @@ DOMAIN_TERMS: Dict[str, Tuple[str, ...]] = {
 
 # 프로필에 노출할 상위 키워드 수 (프롬프트 길이 제어).
 _KEYWORD_TOP_N = 12
+# 분야별 줄에 노출할 키워드 수 — 5분야 × 5개라 프롬프트 부담이 작다.
+_CATEGORY_KEYWORD_TOP_N = 5
 
 
 def _category_distribution(articles: Iterable[Any]) -> List[tuple]:
@@ -93,6 +95,34 @@ def keyword_frequency(
             if any(v in title for v in variants):
                 counter[canonical] += 1
     return counter.most_common()
+
+
+def keyword_frequency_by_category(
+    articles: Iterable[Any],
+    top_n: int = 5,
+    terms: Dict[str, Tuple[str, ...]] = DOMAIN_TERMS,
+) -> List[tuple]:
+    """분야별 키워드 빈도를 [(분야, [(키워드, 건수), ...]), ...]로.
+
+    배경(2026-07-26 운영): 전체 풀 키워드만 주었더니 분야별 인사이트가 그 수치를
+    자기 분야 수치인 양 인용해 산술 모순이 생겼다 — "경제 분야 기사는 25건,
+    AI 키워드가 31건". 25건 분야에서 31건이 나올 수 없다. 분야 단위 인사이트가
+    인용할 수 있는 **같은 스코프의 수치**를 제공해 모순을 없앤다.
+
+    분야 순서는 기사 수 내림차순(프로필의 분야별 분포와 같은 순서).
+    """
+    by_cat: Dict[str, List[Any]] = {}
+    for a in articles:
+        cat = getattr(a, "category", None)
+        if cat:
+            by_cat.setdefault(cat, []).append(a)
+
+    result: List[tuple] = []
+    for cat, _n in _category_distribution(articles):
+        freq = keyword_frequency(by_cat.get(cat, []), terms)[:top_n]
+        if freq:
+            result.append((cat, freq))
+    return result
 
 
 def _fmt_pairs(pairs: List[tuple], prev: Optional[Dict[str, int]] = None) -> str:
@@ -145,7 +175,20 @@ def build_data_profile(
         lines.append(f"· 매체별 기사 수: {_fmt_pairs(media_dist)}")
     if kw_freq:
         lines.append(
-            f"· 주요 키워드 빈도(제목 기준, 상위 {_KEYWORD_TOP_N}): "
+            f"· 【전체 풀 기준】 키워드 빈도(제목, 상위 {_KEYWORD_TOP_N}): "
             f"{_fmt_pairs(kw_freq[:_KEYWORD_TOP_N], prev_kw)}"
+        )
+
+    # 분야별 키워드: 분야 단위 인사이트가 인용할 '같은 스코프' 수치.
+    # 전체 풀 수치와 섞어 쓰면 산술 모순이 생기므로 라벨로 명확히 구분한다.
+    cat_kw = keyword_frequency_by_category(articles, top_n=_CATEGORY_KEYWORD_TOP_N)
+    if cat_kw:
+        lines.append("· 【분야별 기준】 각 분야 상위 키워드 (그 분야 기사만 집계):")
+        for cat, freq in cat_kw:
+            lines.append(f"    - {cat}: {_fmt_pairs(freq)}")
+        lines.append(
+            "  ※ 분야별 인사이트의 관찰에는 **그 분야 줄의 수치**를 인용할 것. "
+            "전체 풀 수치를 분야 수치인 것처럼 쓰면 모순이 된다 "
+            "(예: 25건짜리 분야에 '키워드 31건'은 불가능)."
         )
     return "\n".join(lines)
