@@ -92,6 +92,29 @@ def clean_feed_summary(raw: str) -> str:
     return _ZERO_WIDTH_RE.sub("", html.unescape(s)).strip()
 
 
+# 한글 음절·자모 (영문판 기사 판별용)
+_HANGUL_RE = re.compile(r"[가-힣ㄱ-ㅎㅏ-ㅣ]")
+# 영문 기사로 보려면 최소 이만큼의 라틴 문자가 있어야 한다 (짧은 약어 제목 오탐 방지)
+_ENGLISH_TITLE_MIN_LATIN = 15
+
+
+def is_english_title(title: str) -> bool:
+    """한글이 전혀 없고 라틴 문자가 충분히 많은 제목 = 영문판 기사.
+
+    배경 (2026-07-26 운영): IT조선 RSS에 영문판 기사가 섞여 들어와
+    한국어 브리핑의 경제 분야 출처에 영문 제목이 그대로 노출됐다
+    ("KOSDAQ Loses Ground, Plunging from 4th to 38th in Global Market Returns").
+
+    판정은 보수적으로 한다 — 한글이 **하나도** 없을 때만 영문으로 본다.
+    한국 매체 기사 제목은 영문 고유명사가 섞여도("SKT, AI 자율 네트워크 레벨4")
+    한글이 남으므로 오탐되지 않는다. 라틴 문자 하한을 둬 기호·숫자만 있는
+    비정상 제목까지 영문으로 오인하지 않도록 한다.
+    """
+    if _HANGUL_RE.search(title):
+        return False
+    return sum(c.isascii() and c.isalpha() for c in title) >= _ENGLISH_TITLE_MIN_LATIN
+
+
 BODY_MIN_LEN = 300       # 본문 확보 성공 판정 기준
 DEDUP_JACCARD = 0.7      # 유사 제목 dedup 임계값
 PER_FEED_LIMIT = 30      # 한 피드당 처리할 최대 엔트리 (오래된 것 컷)
@@ -286,6 +309,7 @@ def collect_articles() -> List[Article]:
 
     all_articles: List[Article] = []
     source_stats: Dict[str, int] = {}
+    english_skipped = 0  # 영문판 기사 제외 건수 (가시화용)
 
     for feed_url in RSS_FEEDS:
         source = _source_from_url(feed_url)
@@ -312,6 +336,10 @@ def collect_articles() -> List[Article]:
                     continue
                 title = clean_feed_title(entry.get("title", ""))
                 if not title:
+                    continue
+                if is_english_title(title):
+                    # 영문판 기사 — 한국어 브리핑에 영문 제목 노출 방지
+                    english_skipped += 1
                     continue
                 all_articles.append(Article(
                     title=title,
@@ -352,6 +380,8 @@ def collect_articles() -> List[Article]:
     unique.sort(key=lambda a: a.published, reverse=True)
 
     print(f"  총 {len(unique)}건 수집 (정확 일치 dedup 후)")
+    if english_skipped:
+        print(f"    (영문판 기사 {english_skipped}건 제외)")
     for src, cnt in sorted(source_stats.items(), key=lambda x: -x[1]):
         print(f"    {src}: {cnt}건")
 
