@@ -6,7 +6,7 @@
 (OpenAI 폴백 키도 미설정이라 폴백도 무력)
 
 대응: GeminiProvider.generate가 503/500(ServerError, 5xx)에 한해 코드 레벨
-재시도(3회, 지수 backoff). ClientError(4xx: 400/401/403/429)는 재시도 안 함
+재시도(4회, 지수 backoff). ClientError(4xx: 400/401/403/429)는 재시도 안 함
 — 재시도해도 같은 실패이고, 특히 429 한도 초과를 재시도로 뚫으면 안 됨.
 
 이 테스트는 재시도 분류 로직과 Retrying 조합 동작을 검증한다.
@@ -42,7 +42,7 @@ def _fast_retryer():
     """프로덕션과 동일 정책, backoff만 짧게 (테스트 속도)."""
     return Retrying(
         retry=retry_if_exception(_is_retryable_gemini_error),
-        stop=stop_after_attempt(3),
+        stop=stop_after_attempt(4),
         wait=wait_exponential(multiplier=0.001, max=0.005),
         reraise=True,
     )
@@ -61,7 +61,7 @@ def test_classify_retryable():
 
 
 def test_503_retries_then_fails():
-    """지속 503이면 3회 시도 후 최종 실패(reraise)."""
+    """지속 503이면 4회 시도 후 최종 실패(reraise)."""
     calls = {"n": 0}
 
     def always_503():
@@ -73,7 +73,7 @@ def test_503_retries_then_fails():
         assert False, "예외가 reraise 되어야 함"
     except errors.ServerError:
         pass
-    assert calls["n"] == 3, f"503은 3회 시도해야 함, 실제 {calls['n']}회"
+    assert calls["n"] == 4, f"503은 4회 시도해야 함, 실제 {calls['n']}회"
 
 
 def test_400_no_retry():
@@ -123,6 +123,20 @@ def test_503_then_recover():
     assert calls["n"] == 2, f"1회 실패 후 2회차 성공해야 함, 실제 {calls['n']}회"
 
 
+def test_no_openai_key_falls_back_to_flash_lite():
+    """OpenAI 키가 없어도 폴백이 비지 않는다 — Flash-Lite로 폴백 (2026-09-30 장애)."""
+    import os
+    from unittest import mock
+    import llm
+
+    env = {"GEMINI_API_KEY": "dummy"}
+    with mock.patch.dict(os.environ, env, clear=True):
+        wrapped = llm.get_llm()
+    assert wrapped.primary.name == llm.GEMINI_MODEL
+    assert wrapped.fallback is not None, "OpenAI 키 없을 때도 폴백이 있어야 함"
+    assert wrapped.fallback.name == llm.GEMINI_FALLBACK_MODEL
+
+
 if __name__ == "__main__":
     failures = 0
     tests = [
@@ -131,6 +145,7 @@ if __name__ == "__main__":
         test_400_no_retry,
         test_429_no_retry,
         test_503_then_recover,
+        test_no_openai_key_falls_back_to_flash_lite,
     ]
     for fn in tests:
         try:

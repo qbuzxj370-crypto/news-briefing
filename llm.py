@@ -1,4 +1,6 @@
-"""LLM 추상화 레이어: Gemini 2.5 Flash (1차) + GPT-5 mini (폴백)."""
+"""LLM 추상화 레이어: Gemini 2.5 Flash (1차) + GPT-5 mini (폴백).
+
+OpenAI 키가 없으면 Gemini 2.5 Flash-Lite를 무료 폴백으로 쓴다."""
 
 from __future__ import annotations
 
@@ -15,6 +17,10 @@ from tenacity import (
 
 
 GEMINI_MODEL = "gemini-2.5-flash"
+# OpenAI 키 미설정 시 폴백. 같은 무료 키로 쓸 수 있고 Flash와 용량 풀이 달라
+# Flash가 503(high demand)일 때도 대개 응답한다. 품질은 Flash보다 낮지만
+# 빈 브리핑보다 낫고, Notion '모델' 속성에 실제 사용 모델이 남는다.
+GEMINI_FALLBACK_MODEL = "gemini-2.5-flash-lite"
 OPENAI_MODEL = "gpt-5-mini"
 
 _log = logging.getLogger("llm.retry")
@@ -24,7 +30,7 @@ _log = logging.getLogger("llm.retry")
 # - ServerError(5xx: 503 UNAVAILABLE, 500 INTERNAL)만 재시도 — 일시적 과부하라 풀림
 # - ClientError(4xx: 400/401/403/429)는 재시도 안 함 — 재시도해도 같은 실패
 #   (특히 429 한도 초과는 재시도로 뚫으려 하면 안 됨)
-# - 3회, 지수 backoff 4→8→16초 (총 최대 ~28초, GitHub Actions 타임아웃 여유 안)
+# - 4회, 지수 backoff 4→8→16초 대기 (총 최대 ~28초, GitHub Actions 타임아웃 여유 안)
 def _is_retryable_gemini_error(exc: BaseException) -> bool:
     """ServerError(5xx)만 재시도 대상. 지연 import로 SDK 의존."""
     try:
@@ -107,7 +113,7 @@ class GeminiProvider:
 
         retryer = Retrying(
             retry=retry_if_exception(_is_retryable_gemini_error),
-            stop=stop_after_attempt(3),
+            stop=stop_after_attempt(4),
             wait=wait_exponential(multiplier=4, max=16),
             reraise=True,
             before_sleep=lambda rs: print(
@@ -220,7 +226,7 @@ def get_llm() -> LLMWithFallback:
     """환경변수에서 키를 읽어 LLM 인스턴스 구성.
     
     GEMINI_API_KEY: 필수 (1차)
-    OPENAI_API_KEY: 선택 (폴백). 없으면 폴백 없이 단일 모드.
+    OPENAI_API_KEY: 선택 (폴백). 없으면 Gemini Flash-Lite를 폴백으로 사용.
     """
     gemini_key = os.environ.get("GEMINI_API_KEY")
     openai_key = os.environ.get("OPENAI_API_KEY")
@@ -233,11 +239,13 @@ def get_llm() -> LLMWithFallback:
         raise RuntimeError("GEMINI_API_KEY 또는 OPENAI_API_KEY 중 하나는 필수입니다")
 
     primary = GeminiProvider(gemini_key)
-    fallback = OpenAIProvider(openai_key) if openai_key else None
-
-    if fallback:
-        print(f"[LLM] 1차: {primary.name}, 폴백: {fallback.name}")
+    if openai_key:
+        fallback = OpenAIProvider(openai_key)
     else:
-        print(f"[LLM] 1차: {primary.name} (폴백 없음)")
+        # 폴백 없이 돌면 Flash 503 한 번에 그날 분석이 통째로 빠진다
+        # (2026-06-01, 06-11, 09-30 실측). 같은 키로 다른 모델에 폴백.
+        fallback = GeminiProvider(gemini_key, model=GEMINI_FALLBACK_MODEL)
+
+    print(f"[LLM] 1차: {primary.name}, 폴백: {fallback.name}")
 
     return LLMWithFallback(primary, fallback)

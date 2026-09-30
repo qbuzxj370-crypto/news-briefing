@@ -381,6 +381,9 @@ Gemini 무료 티어 서버 일시 과부하. Google 측 문제, 우리 코드 �
 **해결 (즉시)**  
 잠시(5~30분) 후 GitHub Actions 수동 재실행.
 
+**자동 완화 (2026-09-30~)**  
+`OPENAI_API_KEY`가 없으면 같은 Gemini 키로 `gemini-2.5-flash-lite`에 폴백한다(용량 풀이 달라 Flash 503 때도 대개 응답). 로그에 `[폴백] gemini-2.5-flash-lite로 재시도`가 찍히면 이 경로로 복구된 것. Flash 재시도도 3→4회로 늘림. Flash-Lite까지 503이면 여전히 빈 브리핑 — 아래 영구 해결 필요.
+
 **해결 (영구)**  
 OpenAI API 키 발급 후 GitHub Secret `OPENAI_API_KEY` 등록. Gemini 실패 시 자동으로 GPT-5 mini 폴백 작동:
 
