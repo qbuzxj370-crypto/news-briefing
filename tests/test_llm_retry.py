@@ -137,6 +137,17 @@ def test_no_openai_key_falls_back_to_flash_lite():
     assert wrapped.fallback.name == llm.GEMINI_FALLBACK_MODEL
 
 
+def test_gemini_client_pins_v1beta():
+    """SDK 기본 API 버전과 무관하게 v1beta로 호출한다 (2026-11-25 장애).
+
+    google-genai 3.x는 기본이 v1이고, v1은 system_instruction을 400으로 거부한다.
+    """
+    import llm
+
+    provider = llm.GeminiProvider("dummy")
+    assert provider._client._api_client._http_options.api_version == "v1beta"
+
+
 if __name__ == "__main__":
     failures = 0
     tests = [
@@ -146,6 +157,7 @@ if __name__ == "__main__":
         test_429_no_retry,
         test_503_then_recover,
         test_no_openai_key_falls_back_to_flash_lite,
+        test_gemini_client_pins_v1beta,
     ]
     for fn in tests:
         try:

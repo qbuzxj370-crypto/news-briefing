@@ -1,6 +1,6 @@
-"""LLM 추상화 레이어: Gemini 2.5 Flash (1차) + GPT-5 mini (폴백).
+"""LLM 추상화 레이어: Gemini Flash 최신(1차) + GPT-5 mini (폴백).
 
-OpenAI 키가 없으면 Gemini 2.5 Flash-Lite를 무료 폴백으로 쓴다."""
+OpenAI 키가 없으면 Gemini 3.5 Flash-Lite를 무료 폴백으로 쓴다."""
 
 from __future__ import annotations
 
@@ -16,11 +16,15 @@ from tenacity import (
 )
 
 
-GEMINI_MODEL = "gemini-2.5-flash"
+# 1차는 버전을 고정하지 않고 최신 Flash 별칭을 쓴다. 구버전 고정(2.5)이
+# 단종 위험을 안고 있어서다. 대신 별칭 뒤 실제 버전이 바뀌면 분석 품질도
+# 예고 없이 바뀔 수 있으므로, 응답의 model_version을 매 호출 로그에 남긴다.
+GEMINI_MODEL = "gemini-flash-latest"
 # OpenAI 키 미설정 시 폴백. 같은 무료 키로 쓸 수 있고 Flash와 용량 풀이 달라
 # Flash가 503(high demand)일 때도 대개 응답한다. 품질은 Flash보다 낮지만
 # 빈 브리핑보다 낫고, Notion '모델' 속성에 실제 사용 모델이 남는다.
-GEMINI_FALLBACK_MODEL = "gemini-2.5-flash-lite"
+GEMINI_FALLBACK_MODEL = "gemini-3.5-flash-lite"
+GEMINI_API_VERSION = "v1beta"
 OPENAI_MODEL = "gpt-5-mini"
 
 _log = logging.getLogger("llm.retry")
@@ -67,7 +71,15 @@ class GeminiProvider:
     def __init__(self, api_key: str, model: str = GEMINI_MODEL):
         # google-genai (신 SDK) 사용
         from google import genai
-        self._client = genai.Client(api_key=api_key)
+        from google.genai import types
+        # api_version 고정: google-genai 3.x부터 기본값이 v1로 바뀌었는데 v1은
+        # system_instruction을 거부한다("Developer instruction is not enabled for
+        # api version v1", 400). requirements가 하한만 걸려 있어 CI가 새 SDK를 받는
+        # 순간 전 호출이 실패했다(2026-11-25). v1beta는 구·신 SDK 모두 지원.
+        self._client = genai.Client(
+            api_key=api_key,
+            http_options=types.HttpOptions(api_version=GEMINI_API_VERSION),
+        )
         self._genai = genai
         # 모델을 인스턴스 단위로 고정한다. 기본값은 운영 모델(GEMINI_MODEL)이라
         # 기존 호출부는 그대로 동작하고, ab_probe가 다른 모델을 지정해 같은 입력으로
@@ -129,6 +141,9 @@ class GeminiProvider:
                 fr = getattr(candidates[0], "finish_reason", None)
                 if fr is not None:
                     print(f"    [Gemini] finish_reason={fr}")
+            mv = getattr(resp, "model_version", None)
+            if mv:
+                print(f"    [Gemini] model_version={mv}")
             usage = getattr(resp, "usage_metadata", None)
             if usage:
                 in_tok = getattr(usage, "prompt_token_count", None)
