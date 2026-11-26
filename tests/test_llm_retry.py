@@ -148,6 +148,31 @@ def test_gemini_client_pins_v1beta():
     assert provider._client._api_client._http_options.api_version == "v1beta"
 
 
+def test_last_used_is_served_model_version():
+    """Notion '모델'에는 별칭이 아니라 응답의 실제 모델 버전이 기록된다."""
+    import llm
+
+    class Served:
+        name = "gemini-flash-latest"
+        last_model = None
+        def generate(self, *a, **k):
+            self.last_model = "gemini-x.y-flash-001"
+            return "ok"
+
+    class NoVersion:
+        name = "plain-model"
+        def generate(self, *a, **k):
+            return "ok"
+
+    w = llm.LLMWithFallback(Served(), None)
+    w.generate("s", "u")
+    assert w.last_used == "gemini-x.y-flash-001", w.last_used
+
+    w = llm.LLMWithFallback(NoVersion(), None)
+    w.generate("s", "u")
+    assert w.last_used == "plain-model", w.last_used
+
+
 if __name__ == "__main__":
     failures = 0
     tests = [
@@ -158,6 +183,7 @@ if __name__ == "__main__":
         test_503_then_recover,
         test_no_openai_key_falls_back_to_flash_lite,
         test_gemini_client_pins_v1beta,
+        test_last_used_is_served_model_version,
     ]
     for fn in tests:
         try:

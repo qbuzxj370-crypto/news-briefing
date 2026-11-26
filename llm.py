@@ -87,6 +87,9 @@ class GeminiProvider:
         # 실제 사용 모델이 남는다.
         self._model = model
         self.name = model
+        # 마지막 호출에서 응답이 알려준 실제 모델 버전. 별칭(…-latest)을 쓰면
+        # name과 다르므로 Notion '모델' 속성에는 이 값을 기록한다.
+        self.last_model: Optional[str] = None
 
     def generate(
         self,
@@ -133,6 +136,7 @@ class GeminiProvider:
             ),
         )
         resp = retryer(_call)
+        self.last_model = getattr(resp, "model_version", None) or self._model
 
         # 진단: finish_reason과 사용 토큰 출력
         try:
@@ -141,9 +145,7 @@ class GeminiProvider:
                 fr = getattr(candidates[0], "finish_reason", None)
                 if fr is not None:
                     print(f"    [Gemini] finish_reason={fr}")
-            mv = getattr(resp, "model_version", None)
-            if mv:
-                print(f"    [Gemini] model_version={mv}")
+            print(f"    [Gemini] model_version={self.last_model}")
             usage = getattr(resp, "usage_metadata", None)
             if usage:
                 in_tok = getattr(usage, "prompt_token_count", None)
@@ -168,6 +170,7 @@ class OpenAIProvider:
     def __init__(self, api_key: str):
         from openai import OpenAI
         self._client = OpenAI(api_key=api_key)
+        self.last_model: Optional[str] = None
 
     def generate(
         self,
@@ -194,6 +197,7 @@ class OpenAIProvider:
         if json_mode:
             kwargs["response_format"] = {"type": "json_object"}
         resp = self._client.chat.completions.create(**kwargs)
+        self.last_model = getattr(resp, "model", None) or OPENAI_MODEL
         text = resp.choices[0].message.content
         if not text:
             raise RuntimeError("OpenAI returned empty response")
@@ -203,6 +207,11 @@ class OpenAIProvider:
 # ----------------------------------------------------------------------
 # 폴백 래퍼
 # ----------------------------------------------------------------------
+def _served_model(provider: LLMProvider) -> str:
+    """provider가 실제로 응답한 모델명. 모르면 설정 모델명(name)."""
+    return getattr(provider, "last_model", None) or provider.name
+
+
 class LLMWithFallback:
     """1차 LLM 실패 시 폴백으로 자동 전환."""
 
@@ -222,7 +231,7 @@ class LLMWithFallback:
     ) -> str:
         try:
             result = self.primary.generate(system, user, max_tokens, json_mode, thinking_budget, temperature)
-            self.last_used = self.primary.name
+            self.last_used = _served_model(self.primary)
             return result
         except Exception as e:
             print(f"  [경고] {self.primary.name} 실패: {e}")
@@ -230,7 +239,7 @@ class LLMWithFallback:
                 raise
             print(f"  [폴백] {self.fallback.name}로 재시도")
             result = self.fallback.generate(system, user, max_tokens, json_mode, thinking_budget, temperature)
-            self.last_used = self.fallback.name
+            self.last_used = _served_model(self.fallback)
             return result
 
 
