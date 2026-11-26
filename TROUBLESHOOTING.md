@@ -22,6 +22,7 @@
 | `[robots] <host>: ...` 로그 + 특정 매체 본문 0건 | [R5](#r5-body-drop-by-robots) |
 | `Unterminated string` JSON 파싱 실패 | [L1](#l1-llm-json-truncated) |
 | `503 UNAVAILABLE` Gemini 응답 | [L2](#l2-gemini-overload) |
+| `Developer instruction is not enabled for api version v1` (400) | [L4](#l4-gemini-api-version) |
 | `미해결(분류 실패)` 로그 / Slack `⚠️ 분류 미해결` | [L3](#l3-classification-unresolved) |
 | Checkout 단계에서 잠시 fail 후 성공 | [O1](#o1-checkout-retry) |
 | 로컬 수정사항이 Actions에 반영 안 됨 | [O2](#o2-push-skipped) |
@@ -381,12 +382,15 @@ Gemini 무료 티어 서버 일시 과부하. Google 측 문제, 우리 코드 �
 **해결 (즉시)**  
 잠시(5~30분) 후 GitHub Actions 수동 재실행.
 
+**자동 완화 (2026-09-30~)**  
+같은 Gemini 키로 폴백 체인을 탄다: `gemini-flash-latest`(5xx 재시도 4회) → `gemini-flash-lite-latest`(2회) → `gemini-3.5-flash-lite`(2회, 무료 티어 한도가 가장 넉넉) → `gpt-5-mini`(`OPENAI_API_KEY`가 있을 때만). 로그에 `[폴백] <모델>로 재시도`가 찍히면 그 단계에서 복구된 것이고, Notion '모델' 속성에 실제 응답한 모델 버전이 남는다. Gemini 3단이 모두 실패하고 OpenAI 키도 없으면 여전히 빈 브리핑 — 아래 영구 해결 필요.
+
 **해결 (영구)**  
 OpenAI API 키 발급 후 GitHub Secret `OPENAI_API_KEY` 등록. Gemini 실패 시 자동으로 GPT-5 mini 폴백 작동:
 
 1. https://platform.openai.com/api-keys 에서 키 발급 (결제 등록 필요).
 2. GitHub 저장소 → Settings → Secrets → New repository secret → `OPENAI_API_KEY`.
-3. 다음 실행부터 `[LLM] 1차: gemini-2.5-flash, 폴백: gpt-5-mini` 로그 확인.
+3. 다음 실행부터 `[LLM] 체인: gemini-flash-latest → gemini-flash-lite-latest → gemini-3.5-flash-lite → gpt-5-mini` 로그 확인.
 
 **예방**  
 폴백 LLM 항상 설정. 무료 티어만으로 100% 가용성 보장 불가.
@@ -420,6 +424,25 @@ L2와 동일 — `OPENAI_API_KEY` 폴백 등록. Gemini 배치 실패 시 GPT-5 
 **예방**  
 - 폴백 키 등록(L2). 무료 티어만으로는 배치 실패가 간헐 발생.
 - Slack `분류 미해결` 경고가 잦으면 Gemini 안정성·폴백을 점검. 회복은 재실행으로 자동이지만, 빈도가 높으면 근본 원인(과부하)을 손봐야 함.
+
+---
+
+### L4. Gemini API version
+
+**증상**
+```
+400 INVALID_ARGUMENT. 'Developer instruction is not enabled for api version v1. Use api version v1beta instead.'
+```
+분류 전 배치가 실패해 전량 미해결 → 분석 대상 0건 → 빈 페이지(exit 1). 재시도·폴백으로 안 풀린다(4xx라 재시도 대상 아님, 폴백도 같은 SDK 설정).
+
+**원인**  
+`requirements.txt`가 `google-genai>=0.3.0` 하한만 걸어 CI가 최신 SDK를 받는다. google-genai 3.x부터 Gemini API 기본 버전이 `v1beta`→`v1`로 바뀌었고, `v1`은 `system_instruction`을 거부한다 (2026-11-25 발생).
+
+**해결**  
+`GeminiProvider`가 `http_options=HttpOptions(api_version="v1beta")`로 버전을 명시한다(`llm.GEMINI_API_VERSION`). 회귀 테스트 `tests/test_llm_retry.py::test_gemini_client_pins_v1beta`.
+
+**예방**  
+SDK 메이저 업데이트 시 기본값 변경을 확인. 로그에 `[Gemini] model_version=`이 찍히지 않고 바로 4xx가 나면 SDK·API 버전부터 의심.
 
 **관련 결정**: [ADR-017 분류 부분실패 '미해결' 타입화 + 부분집합 회복](ADR.md#adr-017-분류-부분실패를-미해결-상태로-타입화--부분집합-회복)
 

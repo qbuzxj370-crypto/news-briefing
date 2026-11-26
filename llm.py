@@ -1,4 +1,7 @@
-"""LLM 추상화 레이어: Gemini 2.5 Flash (1차) + GPT-5 mini (폴백)."""
+"""LLM 추상화 레이어.
+
+폴백 체인: Gemini Flash 최신 → Gemini Flash-Lite 최신 → Gemini 3.5 Flash-Lite
+→ GPT-5 mini (OPENAI_API_KEY가 있을 때만)."""
 
 from __future__ import annotations
 
@@ -14,7 +17,17 @@ from tenacity import (
 )
 
 
-GEMINI_MODEL = "gemini-2.5-flash"
+# 1차는 버전을 고정하지 않고 최신 Flash 별칭을 쓴다. 구버전 고정(2.5)이
+# 단종 위험을 안고 있어서다. 대신 별칭 뒤 실제 버전이 바뀌면 분석 품질도
+# 예고 없이 바뀔 수 있으므로, 응답의 model_version을 매 호출 로그에 남긴다.
+GEMINI_MODEL = "gemini-flash-latest"
+# 2차 폴백: 같은 무료 키, Flash와 용량 풀이 달라 Flash가 503(high demand)일
+# 때도 대개 응답한다. 품질은 Flash보다 낮지만 빈 브리핑보다 낫다.
+GEMINI_FALLBACK_MODEL = "gemini-flash-lite-latest"
+# 3차 폴백: 버전 고정. 무료 티어 사용량 한도가 가장 넉넉한 모델이라, 별칭
+# 둘이 한도·과부하로 막혀도 마지막까지 버틴다.
+GEMINI_LAST_RESORT_MODEL = "gemini-3.5-flash-lite"
+GEMINI_API_VERSION = "v1beta"
 OPENAI_MODEL = "gpt-5-mini"
 
 _log = logging.getLogger("llm.retry")
@@ -24,7 +37,7 @@ _log = logging.getLogger("llm.retry")
 # - ServerError(5xx: 503 UNAVAILABLE, 500 INTERNAL)만 재시도 — 일시적 과부하라 풀림
 # - ClientError(4xx: 400/401/403/429)는 재시도 안 함 — 재시도해도 같은 실패
 #   (특히 429 한도 초과는 재시도로 뚫으려 하면 안 됨)
-# - 3회, 지수 backoff 4→8→16초 (총 최대 ~28초, GitHub Actions 타임아웃 여유 안)
+# - 4회, 지수 backoff 4→8→16초 대기 (총 최대 ~28초, GitHub Actions 타임아웃 여유 안)
 def _is_retryable_gemini_error(exc: BaseException) -> bool:
     """ServerError(5xx)만 재시도 대상. 지연 import로 SDK 의존."""
     try:
@@ -58,10 +71,18 @@ class LLMProvider(Protocol):
 class GeminiProvider:
     name = GEMINI_MODEL
 
-    def __init__(self, api_key: str, model: str = GEMINI_MODEL):
+    def __init__(self, api_key: str, model: str = GEMINI_MODEL, attempts: int = 4):
         # google-genai (신 SDK) 사용
         from google import genai
-        self._client = genai.Client(api_key=api_key)
+        from google.genai import types
+        # api_version 고정: google-genai 3.x부터 기본값이 v1로 바뀌었는데 v1은
+        # system_instruction을 거부한다("Developer instruction is not enabled for
+        # api version v1", 400). requirements가 하한만 걸려 있어 CI가 새 SDK를 받는
+        # 순간 전 호출이 실패했다(2026-11-25). v1beta는 구·신 SDK 모두 지원.
+        self._client = genai.Client(
+            api_key=api_key,
+            http_options=types.HttpOptions(api_version=GEMINI_API_VERSION),
+        )
         self._genai = genai
         # 모델을 인스턴스 단위로 고정한다. 기본값은 운영 모델(GEMINI_MODEL)이라
         # 기존 호출부는 그대로 동작하고, ab_probe가 다른 모델을 지정해 같은 입력으로
@@ -69,6 +90,12 @@ class GeminiProvider:
         # 실제 사용 모델이 남는다.
         self._model = model
         self.name = model
+        # 5xx 재시도 횟수. 폴백 단계는 줄여서, 전 모델 장애 시 체인 전체 대기가
+        # 워크플로 타임아웃(25분)을 넘지 않게 한다.
+        self._attempts = attempts
+        # 마지막 호출에서 응답이 알려준 실제 모델 버전. 별칭(…-latest)을 쓰면
+        # name과 다르므로 Notion '모델' 속성에는 이 값을 기록한다.
+        self.last_model: Optional[str] = None
 
     def generate(
         self,
@@ -107,7 +134,7 @@ class GeminiProvider:
 
         retryer = Retrying(
             retry=retry_if_exception(_is_retryable_gemini_error),
-            stop=stop_after_attempt(3),
+            stop=stop_after_attempt(self._attempts),
             wait=wait_exponential(multiplier=4, max=16),
             reraise=True,
             before_sleep=lambda rs: print(
@@ -115,6 +142,7 @@ class GeminiProvider:
             ),
         )
         resp = retryer(_call)
+        self.last_model = getattr(resp, "model_version", None) or self._model
 
         # 진단: finish_reason과 사용 토큰 출력
         try:
@@ -123,6 +151,7 @@ class GeminiProvider:
                 fr = getattr(candidates[0], "finish_reason", None)
                 if fr is not None:
                     print(f"    [Gemini] finish_reason={fr}")
+            print(f"    [Gemini] model_version={self.last_model}")
             usage = getattr(resp, "usage_metadata", None)
             if usage:
                 in_tok = getattr(usage, "prompt_token_count", None)
@@ -147,6 +176,7 @@ class OpenAIProvider:
     def __init__(self, api_key: str):
         from openai import OpenAI
         self._client = OpenAI(api_key=api_key)
+        self.last_model: Optional[str] = None
 
     def generate(
         self,
@@ -173,6 +203,7 @@ class OpenAIProvider:
         if json_mode:
             kwargs["response_format"] = {"type": "json_object"}
         resp = self._client.chat.completions.create(**kwargs)
+        self.last_model = getattr(resp, "model", None) or OPENAI_MODEL
         text = resp.choices[0].message.content
         if not text:
             raise RuntimeError("OpenAI returned empty response")
@@ -182,12 +213,18 @@ class OpenAIProvider:
 # ----------------------------------------------------------------------
 # 폴백 래퍼
 # ----------------------------------------------------------------------
-class LLMWithFallback:
-    """1차 LLM 실패 시 폴백으로 자동 전환."""
+def _served_model(provider: LLMProvider) -> str:
+    """provider가 실제로 응답한 모델명. 모르면 설정 모델명(name)."""
+    return getattr(provider, "last_model", None) or provider.name
 
-    def __init__(self, primary: LLMProvider, fallback: Optional[LLMProvider]):
+
+class LLMWithFallback:
+    """1차 LLM 실패 시 폴백 체인을 순서대로 시도. None인 폴백은 건너뛴다."""
+
+    def __init__(self, primary: LLMProvider, *fallbacks: Optional[LLMProvider]):
         self.primary = primary
-        self.fallback = fallback
+        self.fallbacks = [f for f in fallbacks if f is not None]
+        self.fallback = self.fallbacks[0] if self.fallbacks else None
         self.last_used: str = primary.name
 
     def generate(
@@ -199,18 +236,20 @@ class LLMWithFallback:
         thinking_budget: Optional[int] = None,
         temperature: Optional[float] = None,
     ) -> str:
-        try:
-            result = self.primary.generate(system, user, max_tokens, json_mode, thinking_budget, temperature)
-            self.last_used = self.primary.name
+        chain = [self.primary, *self.fallbacks]
+        for i, provider in enumerate(chain):
+            if i > 0:
+                print(f"  [폴백] {provider.name}로 재시도")
+            try:
+                result = provider.generate(system, user, max_tokens, json_mode, thinking_budget, temperature)
+            except Exception as e:
+                print(f"  [경고] {provider.name} 실패: {e}")
+                if i == len(chain) - 1:
+                    raise
+                continue
+            self.last_used = _served_model(provider)
             return result
-        except Exception as e:
-            print(f"  [경고] {self.primary.name} 실패: {e}")
-            if not self.fallback:
-                raise
-            print(f"  [폴백] {self.fallback.name}로 재시도")
-            result = self.fallback.generate(system, user, max_tokens, json_mode, thinking_budget, temperature)
-            self.last_used = self.fallback.name
-            return result
+        raise AssertionError("unreachable")
 
 
 # ----------------------------------------------------------------------
@@ -219,8 +258,8 @@ class LLMWithFallback:
 def get_llm() -> LLMWithFallback:
     """환경변수에서 키를 읽어 LLM 인스턴스 구성.
     
-    GEMINI_API_KEY: 필수 (1차)
-    OPENAI_API_KEY: 선택 (폴백). 없으면 폴백 없이 단일 모드.
+    GEMINI_API_KEY: 필수 (1~3차)
+    OPENAI_API_KEY: 선택 (마지막 폴백). 없으면 Gemini 체인만 사용.
     """
     gemini_key = os.environ.get("GEMINI_API_KEY")
     openai_key = os.environ.get("OPENAI_API_KEY")
@@ -229,15 +268,18 @@ def get_llm() -> LLMWithFallback:
         # Gemini 키 없으면 OpenAI 단독으로라도 동작
         if openai_key:
             print("[LLM] GEMINI_API_KEY 없음. OpenAI 단독 모드.")
-            return LLMWithFallback(OpenAIProvider(openai_key), None)
+            return LLMWithFallback(OpenAIProvider(openai_key))
         raise RuntimeError("GEMINI_API_KEY 또는 OPENAI_API_KEY 중 하나는 필수입니다")
 
-    primary = GeminiProvider(gemini_key)
-    fallback = OpenAIProvider(openai_key) if openai_key else None
-
-    if fallback:
-        print(f"[LLM] 1차: {primary.name}, 폴백: {fallback.name}")
-    else:
-        print(f"[LLM] 1차: {primary.name} (폴백 없음)")
-
-    return LLMWithFallback(primary, fallback)
+    # 폴백 없이 돌면 Flash 503 한 번에 그날 분석이 통째로 빠진다
+    # (2026-06-01, 06-11, 09-30 실측). 같은 키로 다른 모델에 먼저 폴백하고,
+    # 유료인 OpenAI는 Gemini가 전부 실패했을 때만 쓴다.
+    llm = LLMWithFallback(
+        GeminiProvider(gemini_key),
+        GeminiProvider(gemini_key, model=GEMINI_FALLBACK_MODEL, attempts=2),
+        GeminiProvider(gemini_key, model=GEMINI_LAST_RESORT_MODEL, attempts=2),
+        OpenAIProvider(openai_key) if openai_key else None,
+    )
+    names = " → ".join(p.name for p in [llm.primary, *llm.fallbacks])
+    print(f"[LLM] 체인: {names}")
+    return llm

@@ -6,7 +6,7 @@
 (OpenAI 폴백 키도 미설정이라 폴백도 무력)
 
 대응: GeminiProvider.generate가 503/500(ServerError, 5xx)에 한해 코드 레벨
-재시도(3회, 지수 backoff). ClientError(4xx: 400/401/403/429)는 재시도 안 함
+재시도(4회, 지수 backoff). ClientError(4xx: 400/401/403/429)는 재시도 안 함
 — 재시도해도 같은 실패이고, 특히 429 한도 초과를 재시도로 뚫으면 안 됨.
 
 이 테스트는 재시도 분류 로직과 Retrying 조합 동작을 검증한다.
@@ -42,7 +42,7 @@ def _fast_retryer():
     """프로덕션과 동일 정책, backoff만 짧게 (테스트 속도)."""
     return Retrying(
         retry=retry_if_exception(_is_retryable_gemini_error),
-        stop=stop_after_attempt(3),
+        stop=stop_after_attempt(4),
         wait=wait_exponential(multiplier=0.001, max=0.005),
         reraise=True,
     )
@@ -61,7 +61,7 @@ def test_classify_retryable():
 
 
 def test_503_retries_then_fails():
-    """지속 503이면 3회 시도 후 최종 실패(reraise)."""
+    """지속 503이면 4회 시도 후 최종 실패(reraise)."""
     calls = {"n": 0}
 
     def always_503():
@@ -73,7 +73,7 @@ def test_503_retries_then_fails():
         assert False, "예외가 reraise 되어야 함"
     except errors.ServerError:
         pass
-    assert calls["n"] == 3, f"503은 3회 시도해야 함, 실제 {calls['n']}회"
+    assert calls["n"] == 4, f"503은 4회 시도해야 함, 실제 {calls['n']}회"
 
 
 def test_400_no_retry():
@@ -123,6 +123,97 @@ def test_503_then_recover():
     assert calls["n"] == 2, f"1회 실패 후 2회차 성공해야 함, 실제 {calls['n']}회"
 
 
+def test_no_openai_key_falls_back_to_flash_lite():
+    """OpenAI 키가 없어도 Gemini 폴백 체인이 있다 (2026-09-30 장애)."""
+    import os
+    from unittest import mock
+    import llm
+
+    with mock.patch.dict(os.environ, {"GEMINI_API_KEY": "dummy"}, clear=True):
+        wrapped = llm.get_llm()
+    names = [p.name for p in [wrapped.primary, *wrapped.fallbacks]]
+    assert names == [
+        llm.GEMINI_MODEL, llm.GEMINI_FALLBACK_MODEL, llm.GEMINI_LAST_RESORT_MODEL,
+    ], names
+
+
+def test_openai_is_last_in_chain():
+    """OpenAI(유료)는 Gemini 3단을 다 소진한 뒤에만 쓴다."""
+    import os
+    from unittest import mock
+    import llm
+
+    env = {"GEMINI_API_KEY": "dummy", "OPENAI_API_KEY": "dummy"}
+    with mock.patch.dict(os.environ, env, clear=True):
+        wrapped = llm.get_llm()
+    names = [p.name for p in [wrapped.primary, *wrapped.fallbacks]]
+    assert names[-1] == llm.OPENAI_MODEL and len(names) == 4, names
+
+
+def test_chain_tries_in_order_until_success():
+    """앞 provider가 실패하면 다음으로, 성공한 provider가 last_used가 된다."""
+    import llm
+
+    calls = []
+
+    class P:
+        def __init__(self, name, ok):
+            self.name, self.ok = name, ok
+        def generate(self, *a, **k):
+            calls.append(self.name)
+            if not self.ok:
+                raise RuntimeError(self.name)
+            return self.name
+
+    w = llm.LLMWithFallback(P("a", False), P("b", False), None, P("c", True))
+    assert w.generate("s", "u") == "c"
+    assert calls == ["a", "b", "c"], calls
+    assert w.last_used == "c"
+
+    w = llm.LLMWithFallback(P("a", False), P("b", False))
+    try:
+        w.generate("s", "u")
+        assert False, "전부 실패면 마지막 예외를 올려야 함"
+    except RuntimeError as e:
+        assert str(e) == "b"
+
+
+def test_gemini_client_pins_v1beta():
+    """SDK 기본 API 버전과 무관하게 v1beta로 호출한다 (2026-11-25 장애).
+
+    google-genai 3.x는 기본이 v1이고, v1은 system_instruction을 400으로 거부한다.
+    """
+    import llm
+
+    provider = llm.GeminiProvider("dummy")
+    assert provider._client._api_client._http_options.api_version == "v1beta"
+
+
+def test_last_used_is_served_model_version():
+    """Notion '모델'에는 별칭이 아니라 응답의 실제 모델 버전이 기록된다."""
+    import llm
+
+    class Served:
+        name = "gemini-flash-latest"
+        last_model = None
+        def generate(self, *a, **k):
+            self.last_model = "gemini-x.y-flash-001"
+            return "ok"
+
+    class NoVersion:
+        name = "plain-model"
+        def generate(self, *a, **k):
+            return "ok"
+
+    w = llm.LLMWithFallback(Served(), None)
+    w.generate("s", "u")
+    assert w.last_used == "gemini-x.y-flash-001", w.last_used
+
+    w = llm.LLMWithFallback(NoVersion(), None)
+    w.generate("s", "u")
+    assert w.last_used == "plain-model", w.last_used
+
+
 if __name__ == "__main__":
     failures = 0
     tests = [
@@ -131,6 +222,11 @@ if __name__ == "__main__":
         test_400_no_retry,
         test_429_no_retry,
         test_503_then_recover,
+        test_no_openai_key_falls_back_to_flash_lite,
+        test_openai_is_last_in_chain,
+        test_chain_tries_in_order_until_success,
+        test_gemini_client_pins_v1beta,
+        test_last_used_is_served_model_version,
     ]
     for fn in tests:
         try:
