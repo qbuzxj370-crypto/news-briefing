@@ -383,14 +383,14 @@ Gemini 무료 티어 서버 일시 과부하. Google 측 문제, 우리 코드 �
 잠시(5~30분) 후 GitHub Actions 수동 재실행.
 
 **자동 완화 (2026-09-30~)**  
-`OPENAI_API_KEY`가 없으면 같은 Gemini 키로 `gemini-3.5-flash-lite`에 폴백한다(용량 풀이 달라 Flash 503 때도 대개 응답). 로그에 `[폴백] gemini-3.5-flash-lite로 재시도`가 찍히면 이 경로로 복구된 것. Flash 재시도도 3→4회로 늘림. Flash-Lite까지 503이면 여전히 빈 브리핑 — 아래 영구 해결 필요.
+같은 Gemini 키로 폴백 체인을 탄다: `gemini-flash-latest`(5xx 재시도 4회) → `gemini-flash-lite-latest`(2회) → `gemini-3.5-flash-lite`(2회, 무료 티어 한도가 가장 넉넉) → `gpt-5-mini`(`OPENAI_API_KEY`가 있을 때만). 로그에 `[폴백] <모델>로 재시도`가 찍히면 그 단계에서 복구된 것이고, Notion '모델' 속성에 실제 응답한 모델 버전이 남는다. Gemini 3단이 모두 실패하고 OpenAI 키도 없으면 여전히 빈 브리핑 — 아래 영구 해결 필요.
 
 **해결 (영구)**  
 OpenAI API 키 발급 후 GitHub Secret `OPENAI_API_KEY` 등록. Gemini 실패 시 자동으로 GPT-5 mini 폴백 작동:
 
 1. https://platform.openai.com/api-keys 에서 키 발급 (결제 등록 필요).
 2. GitHub 저장소 → Settings → Secrets → New repository secret → `OPENAI_API_KEY`.
-3. 다음 실행부터 `[LLM] 1차: gemini-flash-latest, 폴백: gpt-5-mini` 로그 확인.
+3. 다음 실행부터 `[LLM] 체인: gemini-flash-latest → gemini-flash-lite-latest → gemini-3.5-flash-lite → gpt-5-mini` 로그 확인.
 
 **예방**  
 폴백 LLM 항상 설정. 무료 티어만으로 100% 가용성 보장 불가.

@@ -31,7 +31,8 @@ CATEGORY_OPTIONS = [
 
 MODEL_OPTIONS = [
     {"name": "gemini-flash-latest", "color": "blue"},
-    {"name": "gemini-3.5-flash-lite", "color": "purple"},
+    {"name": "gemini-flash-lite-latest", "color": "purple"},
+    {"name": "gemini-3.5-flash-lite", "color": "pink"},
     {"name": "gpt-5-mini", "color": "green"},
     {"name": "none", "color": "gray"},
 ]

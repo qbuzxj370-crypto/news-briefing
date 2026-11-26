@@ -124,17 +124,58 @@ def test_503_then_recover():
 
 
 def test_no_openai_key_falls_back_to_flash_lite():
-    """OpenAI 키가 없어도 폴백이 비지 않는다 — Flash-Lite로 폴백 (2026-09-30 장애)."""
+    """OpenAI 키가 없어도 Gemini 폴백 체인이 있다 (2026-09-30 장애)."""
     import os
     from unittest import mock
     import llm
 
-    env = {"GEMINI_API_KEY": "dummy"}
+    with mock.patch.dict(os.environ, {"GEMINI_API_KEY": "dummy"}, clear=True):
+        wrapped = llm.get_llm()
+    names = [p.name for p in [wrapped.primary, *wrapped.fallbacks]]
+    assert names == [
+        llm.GEMINI_MODEL, llm.GEMINI_FALLBACK_MODEL, llm.GEMINI_LAST_RESORT_MODEL,
+    ], names
+
+
+def test_openai_is_last_in_chain():
+    """OpenAI(유료)는 Gemini 3단을 다 소진한 뒤에만 쓴다."""
+    import os
+    from unittest import mock
+    import llm
+
+    env = {"GEMINI_API_KEY": "dummy", "OPENAI_API_KEY": "dummy"}
     with mock.patch.dict(os.environ, env, clear=True):
         wrapped = llm.get_llm()
-    assert wrapped.primary.name == llm.GEMINI_MODEL
-    assert wrapped.fallback is not None, "OpenAI 키 없을 때도 폴백이 있어야 함"
-    assert wrapped.fallback.name == llm.GEMINI_FALLBACK_MODEL
+    names = [p.name for p in [wrapped.primary, *wrapped.fallbacks]]
+    assert names[-1] == llm.OPENAI_MODEL and len(names) == 4, names
+
+
+def test_chain_tries_in_order_until_success():
+    """앞 provider가 실패하면 다음으로, 성공한 provider가 last_used가 된다."""
+    import llm
+
+    calls = []
+
+    class P:
+        def __init__(self, name, ok):
+            self.name, self.ok = name, ok
+        def generate(self, *a, **k):
+            calls.append(self.name)
+            if not self.ok:
+                raise RuntimeError(self.name)
+            return self.name
+
+    w = llm.LLMWithFallback(P("a", False), P("b", False), None, P("c", True))
+    assert w.generate("s", "u") == "c"
+    assert calls == ["a", "b", "c"], calls
+    assert w.last_used == "c"
+
+    w = llm.LLMWithFallback(P("a", False), P("b", False))
+    try:
+        w.generate("s", "u")
+        assert False, "전부 실패면 마지막 예외를 올려야 함"
+    except RuntimeError as e:
+        assert str(e) == "b"
 
 
 def test_gemini_client_pins_v1beta():
@@ -182,6 +223,8 @@ if __name__ == "__main__":
         test_429_no_retry,
         test_503_then_recover,
         test_no_openai_key_falls_back_to_flash_lite,
+        test_openai_is_last_in_chain,
+        test_chain_tries_in_order_until_success,
         test_gemini_client_pins_v1beta,
         test_last_used_is_served_model_version,
     ]
